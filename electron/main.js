@@ -1,0 +1,640 @@
+const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron')
+const path = require('path')
+const fs = require('fs')
+const os = require('os')
+const crypto = require('crypto')
+const { fork, spawn } = require('child_process')
+
+const config = require('./config')
+const addonsLib = require('./addons')
+const streamsLib = require('./streams')
+const vlc = require('./vlc')
+
+const isDev = process.env.ELECTRON_START_URL != null
+const ENGINE_PATH = path.join(__dirname, 'engine', 'server.mjs')
+
+let mainWindow = null
+
+// Hydrated addon records live here; the renderer only ever sees `uid` handles
+// so a manifest URL carrying a Debrid token never crosses into page context.
+let addonRecords = []
+
+// ---- Addon state ----
+
+function uidFor(manifestUrl) {
+  return crypto.createHash('sha1').update(manifestUrl).digest('hex').slice(0, 12)
+}
+
+function publicAddon(addon) {
+  return {
+    uid: uidFor(addon.manifestUrl),
+    id: addon.id || null,
+    name: addon.name || addon.manifestUrl,
+    version: addon.version || '',
+    description: addon.description || '',
+    logo: addon.logo || null,
+    types: addon.types || [],
+    catalogCount: (addon.catalogs || []).length,
+    resources: (addon.resources || []).map((r) => (typeof r === 'string' ? r : r.name)),
+    displayUrl: config.maskUrl(addon.manifestUrl),
+    configured: config.hasSecret(addon.manifestUrl),
+    enabled: addon.enabled !== false,
+    error: addon.error || null,
+  }
+}
+
+function publicAddons() {
+  return addonRecords.map(publicAddon)
+}
+
+function addonByUid(uid) {
+  return addonRecords.find((addon) => uidFor(addon.manifestUrl) === uid) || null
+}
+
+function enabledAddons() {
+  return addonRecords.filter((addon) => addon.enabled !== false && !addon.error)
+}
+
+function broadcast(channel, payload) {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, payload)
+}
+
+/** Re-fetches every stored manifest so capabilities stay current (REQ-1.1). */
+async function hydrateAddons() {
+  const stored = config.getAddons()
+  const { addonTimeoutMs } = config.getSettings()
+
+  addonRecords = await Promise.all(
+    stored.map(async (entry) => {
+      try {
+        const { manifest, manifestUrl } = await addonsLib.fetchManifest(entry.manifestUrl, addonTimeoutMs)
+        return addonsLib.toAddonRecord(manifest, manifestUrl, entry.enabled !== false)
+      } catch (err) {
+        // Keep unreachable addons in the list rather than silently dropping a
+        // user's install — the manager surfaces the error instead.
+        return {
+          ...entry,
+          name: entry.name || entry.manifestUrl,
+          enabled: entry.enabled !== false,
+          resources: entry.resources || [],
+          catalogs: entry.catalogs || [],
+          types: entry.types || [],
+          error: err.message,
+        }
+      }
+    }),
+  )
+
+  config.saveAddons(addonRecords)
+  broadcast('addons:changed', publicAddons())
+  return addonRecords
+}
+
+// ---- P2P engine process ----
+
+let engineProcess = null
+let pendingStart = null
+let engineState = { running: false, infoHash: null, url: null, name: null }
+
+function settleStart(result, error) {
+  if (!pendingStart) return
+  const { resolve, reject, timer } = pendingStart
+  pendingStart = null
+  clearTimeout(timer)
+  if (error) reject(error)
+  else resolve(result)
+}
+
+function onEngineMessage(message) {
+  if (!message || typeof message !== 'object') return
+
+  switch (message.type) {
+    case 'ready':
+      engineState = {
+        running: true,
+        infoHash: message.infoHash,
+        url: message.url,
+        name: message.name,
+        file: message.file,
+      }
+      settleStart(message)
+      break
+    case 'error':
+      settleStart(null, new Error(message.message))
+      break
+    case 'stopped':
+      engineState = { running: false, infoHash: null, url: null, name: null }
+      break
+    default:
+      break
+  }
+
+  broadcast('engine:event', message)
+}
+
+function ensureEngine() {
+  if (engineProcess && engineProcess.connected) return engineProcess
+
+  engineProcess = fork(ENGINE_PATH, [], {
+    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+    // Electron would otherwise re-launch itself as an app window; this makes
+    // the child a plain Node runtime with an IPC channel.
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+  })
+
+  engineProcess.stdout?.on('data', (data) => console.log('[engine]', data.toString().trim()))
+  engineProcess.stderr?.on('data', (data) => console.error('[engine ERR]', data.toString().trim()))
+  engineProcess.on('message', onEngineMessage)
+
+  engineProcess.on('exit', (code, signal) => {
+    engineProcess = null
+    engineState = { running: false, infoHash: null, url: null, name: null }
+    settleStart(null, new Error(`Engine process exited (code ${code}, signal ${signal})`))
+    broadcast('engine:event', { type: 'engine-offline', code, signal })
+  })
+
+  return engineProcess
+}
+
+/**
+ * Where the engine writes. Streaming discards its scratch data, so it lives in
+ * the OS temp dir by default; keeping downloads implies somewhere durable.
+ */
+function resolveDownloadDir(settings) {
+  if (settings.downloadDir) return settings.downloadDir
+  if (settings.keepDownloads) return path.join(app.getPath('downloads'), 'Orion')
+  return null
+}
+
+/**
+ * Removes `orion-*` scratch folders left behind by a crash or a force-quit.
+ * Anything touched in the last five minutes is skipped so a second instance's
+ * live stream is never pulled out from under it.
+ */
+function sweepStaleTempDirs() {
+  const tmp = os.tmpdir()
+  const cutoff = Date.now() - 5 * 60 * 1000
+
+  let entries = []
+  try {
+    entries = fs.readdirSync(tmp, { withFileTypes: true })
+  } catch {
+    return
+  }
+
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !entry.name.startsWith('orion-')) continue
+    const target = path.join(tmp, entry.name)
+    try {
+      if (fs.statSync(target).mtimeMs > cutoff) continue
+      fs.rmSync(target, { recursive: true, force: true })
+      console.log('[main] Removed stale engine folder:', target)
+    } catch {
+      /* in use or already gone */
+    }
+  }
+}
+
+/** Starts a torrent and resolves once the loopback URL is playable (REQ-3.1). */
+function engineStart(stream, settings) {
+  const engine = ensureEngine()
+  const magnetUri = streamsLib.buildMagnet(stream)
+
+  return new Promise((resolve, reject) => {
+    settleStart(null, new Error('Superseded by a newer stream request'))
+
+    // Must outlast the engine's own metadata + buffer deadlines, otherwise this
+    // fires first and masks the engine's far more specific error.
+    const guardMs = 60000 + (Number(settings.bufferTimeoutMs) || 120000) + 30000
+
+    const timer = setTimeout(() => {
+      settleStart(null, new Error('Engine timed out preparing the stream'))
+    }, guardMs)
+
+    pendingStart = { resolve, reject, timer }
+
+    engine.send({
+      cmd: 'start',
+      magnetUri,
+      infoHash: stream.infoHash,
+      fileIdx: stream.fileIdx,
+      port: settings.enginePort,
+      downloadDir: resolveDownloadDir(settings),
+      headBufferBytes: settings.headBufferBytes,
+      tailBufferBytes: settings.tailBufferBytes,
+      readaheadBytes: settings.readaheadBytes,
+      keepDownloads: settings.keepDownloads,
+      bufferTimeoutMs: settings.bufferTimeoutMs,
+    })
+  })
+}
+
+function engineStop() {
+  if (engineProcess && engineProcess.connected) engineProcess.send({ cmd: 'stop' })
+  engineState = { running: false, infoHash: null, url: null, name: null }
+}
+
+function killEngine() {
+  if (!engineProcess) return
+
+  const child = engineProcess
+  engineProcess = null
+
+  try {
+    if (child.connected) child.send({ cmd: 'shutdown' })
+  } catch {
+    /* channel already closed */
+  }
+
+  // Give the engine a moment to unwind its swarm, then make sure it is gone —
+  // an orphaned torrent process would keep seeding after Orion exits.
+  setTimeout(() => {
+    if (child.exitCode !== null) return
+    if (process.platform === 'win32') {
+      // Tree-kill: the engine's own sockets can outlive a plain .kill() here.
+      try {
+        spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' })
+      } catch {
+        /* already gone */
+      }
+    } else {
+      try {
+        child.kill('SIGKILL')
+      } catch {
+        /* already gone */
+      }
+    }
+  }, 1500)
+}
+
+// ---- Window ----
+
+function createWindow() {
+  mainWindow = new BrowserWindow({
+    width: 1360,
+    height: 860,
+    minWidth: 940,
+    minHeight: 620,
+    title: 'Orion',
+    backgroundColor: '#08090d',
+    autoHideMenuBar: true,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+    show: false,
+  })
+
+  const startUrl = isDev
+    ? process.env.ELECTRON_START_URL
+    : `file://${path.join(__dirname, '..', 'frontend', 'dist', 'index.html')}`
+
+  mainWindow.loadURL(startUrl)
+  mainWindow.once('ready-to-show', () => mainWindow.show())
+  mainWindow.on('closed', () => {
+    mainWindow = null
+  })
+
+  // Poster/backdrop links and addon homepages belong in the system browser.
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    shell.openExternal(url)
+    return { action: 'deny' }
+  })
+}
+
+// ---- IPC: app + settings ----
+
+ipcMain.handle('app:info', async () => {
+  const settings = config.getSettings()
+  return {
+    platform: process.platform,
+    versions: { electron: process.versions.electron, node: process.versions.node, chrome: process.versions.chrome },
+    userData: config.userDataDir(),
+    encryptionAvailable: config.encryptionAvailable(),
+    vlcPath: await vlc.findVlc(settings.vlcPath),
+  }
+})
+
+ipcMain.handle('settings:get', () => config.getSettings())
+
+ipcMain.handle('settings:save', (event, patch) => {
+  if (patch && 'vlcPath' in patch) vlc.invalidateCache()
+  return config.saveSettings(patch || {})
+})
+
+ipcMain.handle('cache:clear', () => {
+  addonsLib.clearCache()
+  return { ok: true }
+})
+
+ipcMain.handle('app:openExternal', (event, url) => shell.openExternal(url))
+
+ipcMain.handle('app:showInFolder', (event, target) => {
+  if (target && fs.existsSync(target)) shell.showItemInFolder(target)
+  return { ok: true }
+})
+
+ipcMain.handle('dialog:chooseFolder', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Choose a download folder',
+    properties: ['openDirectory', 'createDirectory'],
+  })
+  if (result.canceled || result.filePaths.length === 0) return { path: null }
+  return { path: result.filePaths[0] }
+})
+
+// ---- IPC: addons (SRS 3.1 Addon Manager) ----
+
+ipcMain.handle('addons:list', () => publicAddons())
+
+ipcMain.handle('addons:refresh', async () => {
+  await hydrateAddons()
+  return publicAddons()
+})
+
+ipcMain.handle('addons:add', async (event, rawUrl) => {
+  const { addonTimeoutMs } = config.getSettings()
+
+  let normalized
+  try {
+    normalized = addonsLib.normalizeManifestUrl(rawUrl)
+  } catch (err) {
+    return { ok: false, error: `Not a usable manifest URL: ${err.message}` }
+  }
+
+  if (addonRecords.some((addon) => addon.manifestUrl === normalized)) {
+    return { ok: false, error: 'That addon is already installed' }
+  }
+
+  try {
+    const { manifest, manifestUrl } = await addonsLib.fetchManifest(normalized, addonTimeoutMs)
+    addonRecords.push(addonsLib.toAddonRecord(manifest, manifestUrl, true))
+    config.saveAddons(addonRecords)
+    broadcast('addons:changed', publicAddons())
+    return { ok: true, addons: publicAddons() }
+  } catch (err) {
+    return { ok: false, error: err.message }
+  }
+})
+
+ipcMain.handle('addons:remove', (event, uid) => {
+  addonRecords = addonRecords.filter((addon) => uidFor(addon.manifestUrl) !== uid)
+  config.saveAddons(addonRecords)
+  broadcast('addons:changed', publicAddons())
+  return publicAddons()
+})
+
+ipcMain.handle('addons:toggle', (event, { uid, enabled }) => {
+  const addon = addonByUid(uid)
+  if (addon) {
+    addon.enabled = Boolean(enabled)
+    config.saveAddons(addonRecords)
+    broadcast('addons:changed', publicAddons())
+  }
+  return publicAddons()
+})
+
+ipcMain.handle('addons:reorder', (event, uids) => {
+  const ordered = []
+  for (const uid of uids || []) {
+    const addon = addonByUid(uid)
+    if (addon && !ordered.includes(addon)) ordered.push(addon)
+  }
+  for (const addon of addonRecords) if (!ordered.includes(addon)) ordered.push(addon)
+
+  addonRecords = ordered
+  config.saveAddons(addonRecords)
+  broadcast('addons:changed', publicAddons())
+  return publicAddons()
+})
+
+// ---- IPC: catalogs, search, meta ----
+
+ipcMain.handle('catalog:shelves', () =>
+  addonsLib.homeShelves(enabledAddons()).map((shelf) => ({
+    ...shelf,
+    uid: uidFor(shelf.manifestUrl),
+    manifestUrl: undefined,
+    key: `${uidFor(shelf.manifestUrl)}::${shelf.type}::${shelf.catalogId}`,
+  })),
+)
+
+ipcMain.handle('catalog:load', async (event, { uid, type, catalogId, skip = 0, genre = null }) => {
+  const addon = addonByUid(uid)
+  if (!addon) return { ok: false, error: 'Addon is no longer installed', metas: [] }
+
+  const { addonTimeoutMs } = config.getSettings()
+  const extra = {}
+  if (skip) extra.skip = skip
+  if (genre) extra.genre = genre
+
+  try {
+    const metas = await addonsLib.fetchCatalog(addon, type, catalogId, extra, addonTimeoutMs)
+    return { ok: true, metas }
+  } catch (err) {
+    return { ok: false, error: err.message, metas: [] }
+  }
+})
+
+ipcMain.handle('search:query', async (event, { query, requestId }) => {
+  const trimmed = (query || '').trim()
+  if (!trimmed) return { ok: true, metas: [], errors: [] }
+
+  const { addonTimeoutMs } = config.getSettings()
+  const targets = addonsLib.searchTargets(enabledAddons())
+
+  const collected = []
+  const errors = []
+  const seen = new Set()
+
+  const absorb = (metas, addonName) => {
+    let added = false
+    for (const meta of metas || []) {
+      if (!meta?.id || seen.has(meta.id)) continue
+      seen.add(meta.id)
+      collected.push({ ...meta, _addon: addonName })
+      added = true
+    }
+    return added
+  }
+
+  // Each catalog is emitted the moment it answers so the grid fills in
+  // progressively instead of waiting on the slowest addon (NFR 5.1).
+  await Promise.all(
+    targets.map(async (target) => {
+      const addon = addonRecords.find((a) => a.manifestUrl === target.manifestUrl)
+      if (!addon) return
+      try {
+        const metas = await addonsLib.fetchCatalog(
+          addon,
+          target.type,
+          target.catalogId,
+          { search: trimmed },
+          addonTimeoutMs,
+        )
+        if (absorb(metas, target.addonName) && requestId) {
+          broadcast('search:partial', { requestId, metas: collected.slice() })
+        }
+      } catch (err) {
+        errors.push({ addon: target.addonName, error: err.message })
+      }
+    }),
+  )
+
+  return { ok: true, metas: collected, errors }
+})
+
+ipcMain.handle('meta:get', async (event, { type, id }) => {
+  const { addonTimeoutMs } = config.getSettings()
+  const capable = enabledAddons().filter((addon) => addonsLib.supportsResource(addon, 'meta', type, id))
+
+  const results = await addonsLib.fanOut(capable, (addon) =>
+    addonsLib.fetchMeta(addon, type, id, addonTimeoutMs),
+  )
+
+  const hit = results.find((result) => result.ok && result.value)
+  if (!hit) {
+    const firstError = results.find((result) => !result.ok)
+    return { ok: false, error: firstError?.error || 'No addon returned metadata for this item', meta: null }
+  }
+  return { ok: true, meta: hit.value }
+})
+
+// ---- IPC: streams (REQ-2.1 – 2.3) ----
+
+ipcMain.handle('streams:get', async (event, { type, id, requestId }) => {
+  const { addonTimeoutMs } = config.getSettings()
+  const capable = enabledAddons().filter((addon) => addonsLib.supportsResource(addon, 'stream', type, id))
+
+  if (capable.length === 0) {
+    return { ok: true, groups: [], errors: [], total: 0, addonsQueried: 0 }
+  }
+
+  const collected = []
+  const errors = []
+
+  await Promise.all(
+    capable.map(async (addon) => {
+      try {
+        const raw = await addonsLib.fetchStreams(addon, type, id, addonTimeoutMs)
+        for (const stream of raw) collected.push(streamsLib.normalizeStream(stream, addon.name))
+        if (raw.length > 0 && requestId) {
+          broadcast('streams:partial', {
+            requestId,
+            groups: streamsLib.groupByResolution(collected.slice()),
+            total: collected.length,
+          })
+        }
+      } catch (err) {
+        errors.push({ addon: addon.name, error: err.message })
+      }
+    }),
+  )
+
+  return {
+    ok: true,
+    groups: streamsLib.groupByResolution(collected),
+    errors,
+    total: collected.length,
+    addonsQueried: capable.length,
+  }
+})
+
+// ---- IPC: playback (SRS 4.4) ----
+
+ipcMain.handle('play:stream', async (event, stream) => {
+  const settings = config.getSettings()
+  const vlcPath = await vlc.findVlc(settings.vlcPath)
+
+  if (!vlcPath) {
+    return { ok: false, code: 'VLC_NOT_FOUND', error: 'VLC was not found on this system' }
+  }
+
+  try {
+    let url
+
+    if (stream.kind === 'p2p') {
+      broadcast('play:status', { phase: 'starting-engine', stream: stream.filename })
+      const ready = await engineStart(stream, settings)
+      url = ready.url
+    } else {
+      url = streamsLib.directUrlFor(stream)
+      if (!url) return { ok: false, code: 'NO_URL', error: 'This stream has no playable source' }
+    }
+
+    broadcast('play:status', { phase: 'launching-vlc', stream: stream.filename })
+    const launched = await vlc.launch(url, {
+      vlcPath,
+      networkCaching: settings.networkCaching,
+      extraArgs: settings.vlcExtraArgs,
+    })
+
+    broadcast('play:status', { phase: 'playing', stream: stream.filename, url })
+    return { ok: true, url, kind: stream.kind, pid: launched.pid }
+  } catch (err) {
+    broadcast('play:status', { phase: 'failed', stream: stream.filename, error: err.message })
+    return { ok: false, code: 'PLAY_FAILED', error: err.message }
+  }
+})
+
+ipcMain.handle('engine:stop', () => {
+  engineStop()
+  return { ok: true }
+})
+
+ipcMain.handle('engine:status', () => engineState)
+
+// ---- IPC: VLC ----
+
+ipcMain.handle('vlc:detect', async () => {
+  const settings = config.getSettings()
+  vlc.invalidateCache()
+  const found = await vlc.findVlc(settings.vlcPath)
+  return { path: found }
+})
+
+ipcMain.handle('vlc:locate', async () => {
+  const filters =
+    process.platform === 'win32'
+      ? [{ name: 'VLC', extensions: ['exe'] }]
+      : [{ name: 'All files', extensions: ['*'] }]
+
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Locate the VLC executable',
+    properties: process.platform === 'darwin' ? ['openFile', 'treatPackageAsDirectory'] : ['openFile'],
+    filters,
+  })
+
+  if (result.canceled || result.filePaths.length === 0) return { path: null }
+
+  const chosen = vlc.normalizeCandidate(result.filePaths[0])
+  if (!vlc.isExecutableFile(chosen)) {
+    return { path: null, error: 'That file is not an executable' }
+  }
+
+  config.saveSettings({ vlcPath: chosen })
+  vlc.invalidateCache()
+  return { path: chosen }
+})
+
+// ---- Lifecycle ----
+
+app.whenReady().then(() => {
+  createWindow()
+  sweepStaleTempDirs()
+  hydrateAddons().catch((err) => console.error('[main] Addon hydration failed:', err.message))
+
+  app.on('activate', () => {
+    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+  })
+})
+
+app.on('window-all-closed', () => {
+  killEngine()
+  if (process.platform !== 'darwin') app.quit()
+})
+
+app.on('before-quit', () => {
+  killEngine()
+})

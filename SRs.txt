@@ -1,0 +1,127 @@
+## 1. Introduction
+
+### 1.1 Purpose
+This document specifies the software requirements for **Orion**, an open-source, alternative multimedia streaming client. Orion acts as a modular frontend shell that implements the Stremio Addon Protocol to aggregate metadata and torrent stream links, bypassing internal media players to stream content directly into VLC Media Player.
+
+### 1.2 Scope
+Orion is designed as a lightweight desktop application (Windows, macOS, Linux). It eliminates heavy, built-in player frameworks by serving exclusively as a catalog explorer and link distributor. It connects to public metadata services (e.g., Cinemeta) and stream scrapers (e.g., Torrentio, The Pirate Bay) to fetch HTTP streams (Debrid) or manage local sequential BitTorrent downloads to pipe directly to an external VLC installation.
+
+### 1.3 Definitions, Acronyms, and Abbreviations
+
+- **SRS:** Software Requirements Specification
+- **Addon Protocol:** The open, HTTP/JSON-based specification used by Stremio to exchange catalog and stream data.
+- **Debrid:** Premium caching services (e.g., Real-Debrid) that provide direct HTTP download links for cached torrents.
+- **P2P:** Peer-to-Peer network communication.
+- **InfoHash:** A unique 40-character hexadecimal string representing a specific torrent dataset.
+
+## 2. General Description
+
+### 2.1 Product Perspective
+Orion operates as an independent client in the decentralized streaming ecosystem. It relies entirely on third-party web services for content data. It does not host, index, or natively decode media files.
+
+```
++------------------+       HTTP / JSON       +-------------------------+
+|   Orion Client   | <=====================> | Stremio Addons          |
+|  (User Interface)|                         | (Cinemeta, Torrentio)   |
++------------------+                         +-------------------------+
+        ||
+        || Launches process with Media Stream
+        \/
++------------------+
+| VLC Media Player |
++------------------+
+```
+
+### 2.2 Product Functions
+
+- **Addon Catalog Synchronization:** Fetch and render media discovery blocks (Movies, Series, Anime) based on user-installed manifests.
+- **Global Content Search:** Query individual metadata addons for strings, collating combined results.
+- **Stream Resolution & Scraping:** Query scraping addons (e.g., Torrentio) for stream candidates mapped to specific catalog item IDs (IMDb/TMDB ID).
+- **Built-in P2P Sequential Engine:** Natively host a background BitTorrent client to sequentially buffer raw torrent infohashes into a readable local loopback HTTP stream.
+- **External Process Orchestration:** Deep-link, call system intents, or execute CLI instances of VLC, passing target stream arguments directly.
+
+### 2.3 User Classes and Characteristics
+
+- **End User:** Technical and semi-technical enthusiasts who want a streamlined, highly responsive UI lacking internal player bloat, utilizing high-quality external visual setups (like OLED monitors) where VLC's advanced custom renderers provide a superior experience compared to internal webview players.
+
+### 2.4 Design and Implementation Constraints
+
+- **Dependency on External Binaries:** The software assumes VLC Media Player is installed on the host operating system.
+- **Network Dependencies:** Stream performance is directly bottlenecked by network bandwidth, Debrid API uptime, or active P2P swarm health.
+
+## 3. External Interface Requirements
+
+### 3.1 User Interfaces
+
+- **Home Dashboard:** Grid layout showcasing posters categorized by customizable shelves ("Trending", "Popular").
+- **Detail Panel:** Full-screen immersive layout displaying movie backdrops, synopsis, runtime, casting metadata, and an explicit listing of available stream links grouped by resolution (4K, 1080p, 720p).
+- **Addon Manager:** Simple text-field layout to paste manifest URLs (`stremio://` or `https://`) with a list view showing toggles for active installations.
+
+### 3.2 Software Interfaces
+
+- **Stremio Addon API Integration:** Standard REST JSON communication over HTTP/HTTPS.
+- **Operating System CLI Engine:** Execution of shell processes through cross-platform command structures (e.g., `child_process` in Node runtime environment or Go native executable spawns).
+
+## 4. System Features
+
+### 4.1 Metadata Engine & Search
+
+#### 4.1.1 Description
+The system interacts with manifest URLs to display visual media options to the user.
+
+#### 4.1.2 Functional Requirements
+
+- **REQ-1.1:** The app must parse valid JSON manifests from metadata endpoints.
+- **REQ-1.2:** The app must structure standard query strings matching:
+`{addon_base_url}/catalog/{type}/{id}.json`.
+- **REQ-1.3:** The search engine must update results dynamically when an alphanumeric value changes inside the interface's search bar.
+
+### 4.2 Stream Pipeline Resolver
+
+#### 4.2.1 Description
+Resolves unique video resource options from configured streaming scrapers.
+
+#### 4.2.2 Functional Requirements
+
+- **REQ-2.1:** Upon item selection, the client must trigger concurrent HTTP requests to all installed stream addons using the catalog identifier: `{addon_base_url}/stream/{type}/{id}.json`.
+- **REQ-2.2:** The app must parse returned stream objects, separating them cleanly by direct HTTP links (`url`) and P2P trackers (`infoHash`).
+- **REQ-2.3:** The UI must display file sizes, seeders (if provided), and resolution badges extracted from the title payload.
+
+### 4.3 P2P Sequential Streaming Module
+
+#### 4.3.1 Description
+Translates real-time P2P swarm data into a standard media link that media players can read natively.
+
+#### 4.3.2 Functional Requirements
+
+- **REQ-3.1:** If a user selects a stream structured by an `infoHash`, the app must pass the hash string to a local background torrent server module.
+- **REQ-3.2:** The P2P module must prioritize downloading sequential pieces (start of the file to end) rather than standard random torrent piece distribution.
+- **REQ-3.3:** The module must establish a local HTTP endpoint (e.g., `http://localhost:8080/stream`) acting as a loopback gateway to feed the buffered bytes to external applications.
+
+### 4.4 VLC External Process Launcher
+
+#### 4.4.1 Description
+Interacts with the operating system to send resolved video sources immediately into VLC.
+
+#### 4.4.2 Functional Requirements
+
+- **REQ-4.1:** Upon clicking a stream variant, the client must compile the destination URL (either remote Debrid HTTP address or local loopback address).
+- **REQ-4.2:** The system must scan standard fallback file directories to locate the host machine's VLC executable (`vlc.exe` on Windows, `/Applications/VLC.app` on macOS, binary paths on Linux).
+- **REQ-4.3:** The application must execute a quiet system call, loading VLC with the specific argument tags: `[VLC_PATH] "[STREAM_URL]" --network-caching=3000`.
+
+## 5. Non-Functional Requirements
+
+### 5.1 Performance
+
+- **Interface Fluidity:** Catalog pagination and image renders must happen asynchronously without freezing the primary UI loop.
+- **Link Generation Latency:** The calculation and formatting of the stream lists must execute within 2 seconds of clicking a target card, subject to external web server response speeds.
+
+### 5.2 Security
+
+- **Debrid Key Protections:** User Debrid API tokens embedded in addon configuration links must be stored entirely locally on the user's host machine config directory, encrypted at rest using OS keychain utilities if available.
+- **Network Safety:** The embedded local P2P engine must strictly enforce isolated process tracking to prevent global buffer overflows.
+
+### 5.3 Software Quality Attributes
+
+- **Portability:** The codebase must maintain identical dependency frameworks across Windows, Linux, and macOS platforms.
+- **Extensibility:** The system must strictly adhere to the standardized Stremio Addon structural architecture, ensuring any addon built for the official client works natively out-of-the-box.
