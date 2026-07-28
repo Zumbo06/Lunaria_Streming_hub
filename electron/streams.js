@@ -66,6 +66,86 @@ function parseProvider(text) {
   return match ? match[1].trim() : null
 }
 
+// ---- Languages ----
+//
+// Addons advertise audio languages two ways: regional-indicator flag emoji
+// (Torrentio's convention) and plain words in the title. Both are read, since
+// a stream frequently carries only one of them.
+
+const FLAG_LANGUAGES = {
+  GB: 'English', US: 'English', AU: 'English', CA: 'English', IE: 'English', NZ: 'English',
+  FR: 'French', ES: 'Spanish', MX: 'Spanish', AR: 'Spanish', DE: 'German', AT: 'German',
+  IT: 'Italian', PT: 'Portuguese', BR: 'Portuguese', RU: 'Russian', UA: 'Ukrainian',
+  JP: 'Japanese', KR: 'Korean', CN: 'Chinese', TW: 'Chinese', HK: 'Chinese',
+  IN: 'Hindi', TR: 'Turkish', NL: 'Dutch', PL: 'Polish', SE: 'Swedish', NO: 'Norwegian',
+  DK: 'Danish', FI: 'Finnish', GR: 'Greek', CZ: 'Czech', HU: 'Hungarian', RO: 'Romanian',
+  BG: 'Bulgarian', HR: 'Croatian', RS: 'Serbian', SK: 'Slovak', IL: 'Hebrew',
+  SA: 'Arabic', EG: 'Arabic', IR: 'Persian', TH: 'Thai', VN: 'Vietnamese', ID: 'Indonesian',
+  MY: 'Malay', PH: 'Filipino', LT: 'Lithuanian', LV: 'Latvian', EE: 'Estonian',
+}
+
+const TEXT_LANGUAGES = [
+  [/\benglish\b|\beng\b/i, 'English'],
+  [/\bfrench\b|\bfrancais\b|\bvff?\b|\btruefrench\b/i, 'French'],
+  [/\bspanish\b|\bespañol\b|\bespanol\b|\bcastellano\b|\blatino\b/i, 'Spanish'],
+  [/\bgerman\b|\bdeutsch\b/i, 'German'],
+  [/\bitalian\b|\bitaliano\b/i, 'Italian'],
+  [/\bportuguese\b|\bportugues\b/i, 'Portuguese'],
+  [/\brussian\b|\brus\b/i, 'Russian'],
+  [/\bjapanese\b|\bjpn\b/i, 'Japanese'],
+  [/\bkorean\b|\bkor\b/i, 'Korean'],
+  [/\bchinese\b|\bmandarin\b|\bcantonese\b/i, 'Chinese'],
+  [/\bhindi\b|\btamil\b|\btelugu\b/i, 'Hindi'],
+  [/\bturkish\b|\btürkçe\b|\bturkce\b/i, 'Turkish'],
+  [/\bdutch\b|\bnederlands\b/i, 'Dutch'],
+  [/\bpolish\b|\bpolski\b|\blektor\b/i, 'Polish'],
+  [/\bswedish\b/i, 'Swedish'],
+  [/\bdanish\b/i, 'Danish'],
+  [/\bnorwegian\b/i, 'Norwegian'],
+  [/\bfinnish\b/i, 'Finnish'],
+  [/\bgreek\b/i, 'Greek'],
+  [/\bczech\b/i, 'Czech'],
+  [/\bhungarian\b/i, 'Hungarian'],
+  [/\bromanian\b/i, 'Romanian'],
+  [/\bukrainian\b/i, 'Ukrainian'],
+  [/\barabic\b/i, 'Arabic'],
+  [/\bhebrew\b/i, 'Hebrew'],
+  [/\bthai\b/i, 'Thai'],
+  [/\bvietnamese\b/i, 'Vietnamese'],
+  [/\bhindi\b/i, 'Hindi'],
+]
+
+/** Decodes regional-indicator pairs (🇬🇧 -> "GB") into language names. */
+function languagesFromFlags(text) {
+  const found = []
+  const matches = text.match(/[\u{1F1E6}-\u{1F1FF}]{2}/gu) || []
+
+  for (const flag of matches) {
+    const points = [...flag].map((char) => char.codePointAt(0) - 0x1f1e6)
+    if (points.some((point) => point < 0 || point > 25)) continue
+
+    const code = points.map((point) => String.fromCharCode(65 + point)).join('')
+    const language = FLAG_LANGUAGES[code]
+    if (language && !found.includes(language)) found.push(language)
+  }
+
+  return found
+}
+
+function parseLanguages(text) {
+  const languages = languagesFromFlags(text)
+
+  for (const [pattern, language] of TEXT_LANGUAGES) {
+    if (pattern.test(text) && !languages.includes(language)) languages.push(language)
+  }
+
+  return languages
+}
+
+function parseMultiAudio(text) {
+  return /\bmulti[\s-]?(audio|lang)|\bdual[\s-]?audio\b|\bdub(bed)?\b/i.test(text)
+}
+
 const TAG_PATTERNS = [
   [/\bremux\b/i, 'REMUX'],
   [/blu-?ray|\bbdrip\b|\bbrrip\b/i, 'BluRay'],
@@ -131,6 +211,8 @@ function normalizeStream(stream, addonName) {
     sizeLabel,
     seeders: parseSeeders(haystack),
     provider: parseProvider(haystack),
+    languages: parseLanguages(haystack),
+    multiAudio: parseMultiAudio(haystack),
     tags: parseTags(haystack),
     cached: parseCached(haystack),
     url: stream.url || null,
@@ -212,6 +294,8 @@ module.exports = {
   parseSize,
   parseSeeders,
   parseTags,
+  parseLanguages,
+  parseMultiAudio,
   classify,
   normalizeStream,
   groupByResolution,

@@ -1,9 +1,13 @@
 import { useEffect, useState } from 'react'
 import { NavLink, useLocation, useNavigate, useSearchParams } from 'react-router-dom'
-import { Home, Puzzle, Search, Settings, X } from 'lucide-react'
+import { Bookmark, Home, Maximize2, Minimize2, Puzzle, Search, Settings, Users, X } from 'lucide-react'
+import { appApi } from '../api/orion.js'
+import { useProfile } from './ProfileProvider.jsx'
+import Avatar from './Avatar.jsx'
 
 const NAV = [
   { to: '/', label: 'Home', icon: Home, end: true },
+  { to: '/watchlist', label: 'Watchlist', icon: Bookmark },
   { to: '/addons', label: 'Addons', icon: Puzzle },
   { to: '/settings', label: 'Settings', icon: Settings },
 ]
@@ -13,6 +17,13 @@ export default function TopBar() {
   const location = useLocation()
   const [searchParams] = useSearchParams()
   const [term, setTerm] = useState('')
+  const [fullscreen, setFullscreen] = useState(false)
+  const { current, profiles, switchProfile } = useProfile()
+
+  useEffect(() => {
+    appApi.isFullscreen().then((state) => setFullscreen(state.fullscreen))
+    return appApi.onFullscreenChange(({ fullscreen: next }) => setFullscreen(next))
+  }, [])
 
   const onSearchPage = location.pathname === '/search'
 
@@ -89,6 +100,29 @@ export default function TopBar() {
             </button>
           )}
         </div>
+
+        <button
+          type="button"
+          onClick={() => appApi.toggleFullscreen()}
+          title={fullscreen ? 'Leave fullscreen (F11 or Esc)' : 'Fullscreen (F11)'}
+          aria-label={fullscreen ? 'Leave fullscreen' : 'Enter fullscreen'}
+          className="focus-ring shrink-0 rounded-lg p-2 text-ink-500 transition hover:bg-ink-850 hover:text-slate-200"
+        >
+          {fullscreen ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
+        </button>
+
+        {current && (
+          <button
+            type="button"
+            onClick={switchProfile}
+            title={`${current.name} — switch profile`}
+            className="focus-ring flex shrink-0 items-center gap-2 rounded-lg py-1 pl-1 pr-2 transition hover:bg-ink-850"
+          >
+            <Avatar profile={current} size={32} />
+            <span className="max-w-[92px] truncate text-[12px] font-medium text-haze">{current.name}</span>
+            <Users size={13} className="text-ink-500" />
+          </button>
+        )}
       </div>
     </header>
   )

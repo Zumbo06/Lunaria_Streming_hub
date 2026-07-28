@@ -66,7 +66,7 @@ export default function SearchPage() {
   const showSkeletons = loading && metas.length === 0
 
   return (
-    <div className="mx-auto max-w-[1500px] px-6 py-6 pb-24">
+    <div className="page py-6 pb-24">
       <div className="mb-5 flex items-baseline gap-3">
         <h1 className="text-[15px] font-semibold text-slate-100">
           Results for <span className="text-accent-soft">“{query}”</span>

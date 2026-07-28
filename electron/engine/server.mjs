@@ -15,6 +15,7 @@
 //   in  { cmd: 'stop' } | { cmd: 'shutdown' }
 //   out { type: 'metadata' | 'buffering' | 'ready' | 'progress' | 'stopped' | 'error' }
 
+import crypto from 'node:crypto'
 import fs from 'node:fs'
 import http from 'node:http'
 import net from 'node:net'
@@ -73,6 +74,11 @@ let readaheadBytes = 24 * 1024 * 1024
 // When set, the finished file survives `stop` instead of being wiped.
 let keepFiles = false
 
+// Per-stream secret in the URL path. Without it the loopback port is readable
+// by any other local process or web page for as long as a stream is running.
+// Rotated on every `start`, so a URL from a previous stream stops working.
+let sessionToken = null
+
 function send(message) {
   if (process.send) process.send(message)
 }
@@ -89,6 +95,18 @@ client.on('error', (err) => {
 
 function mimeFor(name) {
   return MIME_TYPES[path.extname(name).toLowerCase()] || 'application/octet-stream'
+}
+
+/** Constant-time check of the `/s/<token>/...` path segment. */
+function tokenMatches(url) {
+  if (!sessionToken || !url) return false
+
+  const supplied = url.split('/')[2] || ''
+  const expected = Buffer.from(sessionToken)
+  const given = Buffer.from(supplied)
+
+  if (given.length !== expected.length) return false
+  return crypto.timingSafeEqual(given, expected)
 }
 
 function parseRange(header, size) {
@@ -161,8 +179,8 @@ function handleRequest(req, res) {
     return res.end()
   }
 
-  if (!req.url || !decodeURIComponent(req.url).includes(torrent.infoHash)) {
-    res.writeHead(404)
+  if (!tokenMatches(req.url)) {
+    res.writeHead(403)
     return res.end()
   }
 
@@ -251,9 +269,15 @@ async function ensureServer(preferredPort) {
   return port
 }
 
-function streamUrlFor(torrent, file, port) {
-  const encoded = file.path.split(/[\\/]/).map(encodeURIComponent).join('/')
-  return `http://127.0.0.1:${port}/webtorrent/${torrent.infoHash}/${encoded}`
+/**
+ * The URL carries no title, no filename and no infohash — only the session
+ * token and the container extension, which players need as a demuxer hint.
+ * Anything watching the port or the process list learns nothing about what is
+ * being streamed.
+ */
+function streamUrlFor(file, port, token) {
+  const extension = path.extname(file.name).toLowerCase() || '.bin'
+  return `http://127.0.0.1:${port}/s/${token}/media${extension}`
 }
 
 // ---- File selection ----
@@ -413,6 +437,8 @@ function stop() {
 
   activeTorrent = null
   activeFile = null
+  // Retire the URL along with the stream.
+  sessionToken = null
 
   if (!torrent) {
     cleanupTempDir()
@@ -496,8 +522,10 @@ async function start(payload) {
 
   const windows = prebuffer(torrent, file, headBufferBytes, tailBufferBytes)
 
+  sessionToken = crypto.randomBytes(24).toString('base64url')
+
   const listenPort = await ensureServer(port)
-  const url = streamUrlFor(torrent, file, listenPort)
+  const url = streamUrlFor(file, listenPort, sessionToken)
 
   send({
     type: 'metadata',

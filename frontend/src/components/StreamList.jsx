@@ -84,6 +84,17 @@ function StreamRow({ stream, busy, disabled, onPlay }) {
                 {stream.seeders}
               </Badge>
             )}
+            {stream.multiAudio && <Badge tone="accent">MULTI</Badge>}
+            {(stream.languages || []).slice(0, 4).map((language) => (
+              <Badge key={language} tone="accent" title={`Audio: ${language}`}>
+                {language}
+              </Badge>
+            ))}
+            {(stream.languages || []).length > 4 && (
+              <Badge tone="muted" title={stream.languages.join(', ')}>
+                +{stream.languages.length - 4}
+              </Badge>
+            )}
             {stream.tags.map((tag) => (
               <Badge key={tag} tone={tag === 'CAM' ? 'red' : 'default'}>
                 {tag}

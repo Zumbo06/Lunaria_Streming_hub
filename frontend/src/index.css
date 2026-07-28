@@ -36,6 +36,32 @@
 }
 
 @layer components {
+  /* Shared page gutter. Widens on large and fullscreen displays instead of
+     stranding the catalogue in a narrow column down the middle. */
+  .page {
+    @apply mx-auto w-full px-6;
+    max-width: 1500px;
+  }
+
+  @media (min-width: 1700px) {
+    .page {
+      @apply px-10;
+      max-width: 1660px;
+    }
+  }
+
+  @media (min-width: 2100px) {
+    .page {
+      max-width: 2000px;
+    }
+  }
+
+  @media (min-width: 2600px) {
+    .page {
+      max-width: 2400px;
+    }
+  }
+
   .no-scrollbar {
     scrollbar-width: none;
   }

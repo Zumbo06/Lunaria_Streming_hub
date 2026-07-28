@@ -8,12 +8,24 @@ const { fork, spawn } = require('child_process')
 const config = require('./config')
 const addonsLib = require('./addons')
 const streamsLib = require('./streams')
+const library = require('./library')
+const subtitlesLib = require('./subtitles')
 const vlc = require('./vlc')
 
 const isDev = process.env.ELECTRON_START_URL != null
 const ENGINE_PATH = path.join(__dirname, 'engine', 'server.mjs')
 
 let mainWindow = null
+
+// Whose watchlist and history the app is currently reading and writing.
+let currentProfileId = null
+
+function activeProfileId() {
+  if (currentProfileId && library.getProfile(currentProfileId)) return currentProfileId
+  const [first] = library.listProfiles()
+  currentProfileId = first ? first.id : null
+  return currentProfileId
+}
 
 // Hydrated addon records live here; the renderer only ever sees `uid` handles
 // so a manifest URL carrying a Debrid token never crosses into page context.
@@ -267,6 +279,83 @@ function killEngine() {
   }, 1500)
 }
 
+// ---- Playback tracking ----
+//
+// Orion never decodes anything, so the only source of a real playback position
+// is VLC itself. Its HTTP interface is polled while a session runs; when it
+// stops answering, VLC has been closed, the last position is committed and the
+// swarm is torn down so nothing keeps downloading after viewing has finished.
+
+const POLL_INTERVAL_MS = 5000
+const MISSES_BEFORE_ENDED = 3
+
+let playbackSession = null
+
+function stopPlaybackTracking() {
+  if (!playbackSession) return
+  clearInterval(playbackSession.timer)
+  playbackSession = null
+}
+
+function recordProgress(session, status) {
+  if (!status || status.lengthSeconds <= 0) return null
+  const saved = library.saveProgress(session.profileId, {
+    ...session.item,
+    positionSeconds: status.timeSeconds,
+    durationSeconds: status.lengthSeconds,
+  })
+  session.last = { ...status, ...saved }
+  return saved
+}
+
+function startPlaybackTracking(control, item, profileId) {
+  stopPlaybackTracking()
+  if (!control || !item?.id) return
+
+  const session = { control, item, profileId, misses: 0, last: null, timer: null }
+
+  session.timer = setInterval(async () => {
+    if (playbackSession !== session) return
+
+    const status = await vlc.readStatus(control)
+
+    if (!status) {
+      session.misses += 1
+      if (session.misses < MISSES_BEFORE_ENDED) return
+
+      // VLC is gone. Commit whatever was last seen and release the swarm.
+      stopPlaybackTracking()
+      broadcast('playback:ended', { item: session.item, last: session.last })
+      engineStop()
+      return
+    }
+
+    session.misses = 0
+    const saved = recordProgress(session, status)
+    if (saved) {
+      broadcast('playback:progress', {
+        item: session.item,
+        state: status.state,
+        positionSeconds: status.timeSeconds,
+        durationSeconds: status.lengthSeconds,
+        percent: saved.percent,
+        finished: saved.finished,
+      })
+    }
+  }, POLL_INTERVAL_MS)
+
+  playbackSession = session
+}
+
+/** Resume point for an item, ignoring "barely started" and "basically done". */
+function resumePointFor(profileId, item) {
+  if (!item?.id) return 0
+  const existing = library.getProgress(profileId, item.type, item.videoId || item.id)
+  if (!existing || existing.finished) return 0
+  if (existing.percent < 0.01 || existing.percent > 0.92) return 0
+  return Math.max(0, Math.floor(existing.positionSeconds))
+}
+
 // ---- Window ----
 
 function createWindow() {
@@ -295,6 +384,24 @@ function createWindow() {
   mainWindow.on('closed', () => {
     mainWindow = null
   })
+
+  // F11 anywhere in the app, and Escape to leave fullscreen. Handled here
+  // rather than in the renderer so it works regardless of focus.
+  mainWindow.webContents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown') return
+
+    if (input.key === 'F11') {
+      event.preventDefault()
+      mainWindow.setFullScreen(!mainWindow.isFullScreen())
+    } else if (input.key === 'Escape' && mainWindow.isFullScreen()) {
+      event.preventDefault()
+      mainWindow.setFullScreen(false)
+    }
+  })
+
+  for (const change of ['enter-full-screen', 'leave-full-screen']) {
+    mainWindow.on(change, () => broadcast('window:fullscreen', { fullscreen: mainWindow.isFullScreen() }))
+  }
 
   // Poster/backdrop links and addon homepages belong in the system browser.
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
@@ -334,6 +441,52 @@ ipcMain.handle('app:showInFolder', (event, target) => {
   if (target && fs.existsSync(target)) shell.showItemInFolder(target)
   return { ok: true }
 })
+
+const AVATAR_MIME = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.bmp': 'image/bmp',
+}
+
+/**
+ * Reads a picture off disk as a data URL. The renderer downscales it before it
+ * is stored, so only a small square ends up in the encrypted profile payload.
+ */
+ipcMain.handle('dialog:chooseImage', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Choose a profile picture',
+    properties: ['openFile'],
+    filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'] }],
+  })
+
+  if (result.canceled || result.filePaths.length === 0) return { dataUrl: null }
+
+  const file = result.filePaths[0]
+  const mime = AVATAR_MIME[path.extname(file).toLowerCase()]
+  if (!mime) return { dataUrl: null, error: 'That file type is not a supported image' }
+
+  try {
+    const stat = fs.statSync(file)
+    if (stat.size > 24 * 1024 * 1024) return { dataUrl: null, error: 'That image is too large (24 MB limit)' }
+
+    const data = fs.readFileSync(file)
+    return { dataUrl: `data:${mime};base64,${data.toString('base64')}`, name: path.basename(file) }
+  } catch (err) {
+    return { dataUrl: null, error: err.message }
+  }
+})
+
+ipcMain.handle('window:toggleFullscreen', () => {
+  if (!mainWindow) return { fullscreen: false }
+  const next = !mainWindow.isFullScreen()
+  mainWindow.setFullScreen(next)
+  return { fullscreen: next }
+})
+
+ipcMain.handle('window:isFullscreen', () => ({ fullscreen: mainWindow?.isFullScreen() ?? false }))
 
 ipcMain.handle('dialog:chooseFolder', async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
@@ -541,15 +694,51 @@ ipcMain.handle('streams:get', async (event, { type, id, requestId }) => {
   }
 })
 
+// ---- IPC: subtitles ----
+
+ipcMain.handle('subtitles:get', async (event, { type, id, extra }) => {
+  const { addonTimeoutMs, preferredSubtitleLanguages } = config.getSettings()
+  const capable = enabledAddons().filter((addon) => addonsLib.supportsResource(addon, 'subtitles', type, id))
+
+  if (capable.length === 0) {
+    return { ok: true, groups: [], errors: [], total: 0, addonsQueried: 0 }
+  }
+
+  const collected = []
+  const errors = []
+
+  await Promise.all(
+    capable.map(async (addon) => {
+      try {
+        const raw = await addonsLib.fetchSubtitles(addon, type, id, extra || {}, addonTimeoutMs)
+        for (const subtitle of raw) collected.push(subtitlesLib.normalizeSubtitle(subtitle, addon.name))
+      } catch (err) {
+        errors.push({ addon: addon.name, error: err.message })
+      }
+    }),
+  )
+
+  return {
+    ok: true,
+    groups: subtitlesLib.organise(collected, preferredSubtitleLanguages || []),
+    errors,
+    total: collected.length,
+    addonsQueried: capable.length,
+  }
+})
+
 // ---- IPC: playback (SRS 4.4) ----
 
-ipcMain.handle('play:stream', async (event, stream) => {
+ipcMain.handle('play:stream', async (event, { stream, item, subtitle } = {}) => {
   const settings = config.getSettings()
   const vlcPath = await vlc.findVlc(settings.vlcPath)
 
   if (!vlcPath) {
     return { ok: false, code: 'VLC_NOT_FOUND', error: 'VLC was not found on this system' }
   }
+
+  const profileId = activeProfileId()
+  const resumeAt = settings.resumePlayback === false ? 0 : resumePointFor(profileId, item)
 
   try {
     let url
@@ -563,20 +752,117 @@ ipcMain.handle('play:stream', async (event, stream) => {
       if (!url) return { ok: false, code: 'NO_URL', error: 'This stream has no playable source' }
     }
 
+    // Subtitles must be on disk before VLC starts: --sub-file takes no URL.
+    let subtitleFile = null
+    if (subtitle?.url) {
+      broadcast('play:status', { phase: 'fetching-subtitle', stream: stream.filename })
+      try {
+        subtitleFile = await subtitlesLib.download(subtitle.url)
+      } catch (err) {
+        // A missing subtitle should never block the film.
+        broadcast('play:status', { phase: 'subtitle-failed', stream: stream.filename, error: err.message })
+      }
+    }
+
     broadcast('play:status', { phase: 'launching-vlc', stream: stream.filename })
     const launched = await vlc.launch(url, {
       vlcPath,
       networkCaching: settings.networkCaching,
       extraArgs: settings.vlcExtraArgs,
+      startTimeSeconds: resumeAt,
+      enableControl: settings.trackProgress !== false,
+      subtitleFile,
     })
 
-    broadcast('play:status', { phase: 'playing', stream: stream.filename, url })
-    return { ok: true, url, kind: stream.kind, pid: launched.pid }
+    if (settings.trackProgress !== false && item?.id) {
+      startPlaybackTracking(launched.control, item, profileId)
+    }
+
+    broadcast('play:status', {
+      phase: 'playing',
+      stream: stream.filename,
+      url,
+      resumedAt: resumeAt,
+      subtitle: subtitleFile ? subtitle.language : null,
+    })
+    return {
+      ok: true,
+      url,
+      kind: stream.kind,
+      pid: launched.pid,
+      resumedAt: resumeAt,
+      subtitleLoaded: Boolean(subtitleFile),
+    }
   } catch (err) {
     broadcast('play:status', { phase: 'failed', stream: stream.filename, error: err.message })
     return { ok: false, code: 'PLAY_FAILED', error: err.message }
   }
 })
+
+// ---- IPC: profiles, watchlist, history ----
+
+ipcMain.handle('profiles:list', () => library.listProfiles())
+
+ipcMain.handle('profiles:current', () => library.getProfile(activeProfileId()))
+
+ipcMain.handle('profiles:select', (event, id) => {
+  const profile = library.getProfile(id)
+  if (!profile) return null
+  currentProfileId = id
+  library.touchProfile(id)
+  // Switching identity mid-stream would attribute the rest of it to the wrong
+  // profile, so the current session is closed out first.
+  stopPlaybackTracking()
+  broadcast('profiles:changed', { current: profile, profiles: library.listProfiles() })
+  return profile
+})
+
+ipcMain.handle('profiles:create', (event, details) => {
+  const profile = library.createProfile(details || {})
+  broadcast('profiles:changed', { current: library.getProfile(activeProfileId()), profiles: library.listProfiles() })
+  return profile
+})
+
+ipcMain.handle('profiles:update', (event, { id, ...details }) => {
+  const profile = library.updateProfile(id, details)
+  broadcast('profiles:changed', { current: library.getProfile(activeProfileId()), profiles: library.listProfiles() })
+  return profile
+})
+
+ipcMain.handle('profiles:delete', (event, id) => {
+  try {
+    const remaining = library.deleteProfile(id)
+    if (currentProfileId === id) currentProfileId = remaining[0]?.id ?? null
+    broadcast('profiles:changed', { current: library.getProfile(activeProfileId()), profiles: remaining })
+    return { ok: true, profiles: remaining }
+  } catch (err) {
+    return { ok: false, error: err.message }
+  }
+})
+
+ipcMain.handle('watchlist:get', () => library.getWatchlist(activeProfileId()))
+
+ipcMain.handle('watchlist:add', (event, item) => library.addToWatchlist(activeProfileId(), item))
+
+ipcMain.handle('watchlist:remove', (event, { type, id }) =>
+  library.removeFromWatchlist(activeProfileId(), type, id),
+)
+
+ipcMain.handle('watchlist:has', (event, { type, id }) => library.inWatchlist(activeProfileId(), type, id))
+
+ipcMain.handle('progress:continue', (event, limit) => library.getContinueWatching(activeProfileId(), limit || 20))
+
+ipcMain.handle('progress:get', (event, { type, videoId }) =>
+  library.getProgress(activeProfileId(), type, videoId),
+)
+
+ipcMain.handle('progress:clear', (event, { type, videoId }) =>
+  library.clearProgress(activeProfileId(), type, videoId),
+)
+
+ipcMain.handle('progress:clearAll', () => library.clearAllProgress(activeProfileId()))
+
+ipcMain.handle('library:stats', () => library.stats(activeProfileId()))
 
 ipcMain.handle('engine:stop', () => {
   engineStop()
@@ -621,6 +907,7 @@ ipcMain.handle('vlc:locate', async () => {
 // ---- Lifecycle ----
 
 app.whenReady().then(() => {
+  library.init()
   createWindow()
   sweepStaleTempDirs()
   hydrateAddons().catch((err) => console.error('[main] Addon hydration failed:', err.message))
@@ -636,5 +923,8 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', () => {
+  stopPlaybackTracking()
   killEngine()
+  subtitlesLib.cleanup()
+  library.close()
 })

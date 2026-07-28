@@ -17,7 +17,11 @@ contextBridge.exposeInMainWorld('orion', {
     openExternal: (url) => ipcRenderer.invoke('app:openExternal', url),
     clearCache: () => ipcRenderer.invoke('cache:clear'),
     chooseFolder: () => ipcRenderer.invoke('dialog:chooseFolder'),
+    chooseImage: () => ipcRenderer.invoke('dialog:chooseImage'),
     showInFolder: (target) => ipcRenderer.invoke('app:showInFolder', target),
+    toggleFullscreen: () => ipcRenderer.invoke('window:toggleFullscreen'),
+    isFullscreen: () => ipcRenderer.invoke('window:isFullscreen'),
+    onFullscreenChange: (handler) => subscribe('window:fullscreen', handler),
   },
 
   settings: {
@@ -54,9 +58,40 @@ contextBridge.exposeInMainWorld('orion', {
     onPartial: (handler) => subscribe('streams:partial', handler),
   },
 
+  subtitles: {
+    get: (type, id, extra) => ipcRenderer.invoke('subtitles:get', { type, id, extra }),
+  },
+
   play: {
-    stream: (stream) => ipcRenderer.invoke('play:stream', stream),
+    stream: (stream, item, subtitle) => ipcRenderer.invoke('play:stream', { stream, item, subtitle }),
     onStatus: (handler) => subscribe('play:status', handler),
+    onProgress: (handler) => subscribe('playback:progress', handler),
+    onEnded: (handler) => subscribe('playback:ended', handler),
+  },
+
+  profiles: {
+    list: () => ipcRenderer.invoke('profiles:list'),
+    current: () => ipcRenderer.invoke('profiles:current'),
+    select: (id) => ipcRenderer.invoke('profiles:select', id),
+    create: (details) => ipcRenderer.invoke('profiles:create', details),
+    update: (details) => ipcRenderer.invoke('profiles:update', details),
+    remove: (id) => ipcRenderer.invoke('profiles:delete', id),
+    onChanged: (handler) => subscribe('profiles:changed', handler),
+  },
+
+  watchlist: {
+    get: () => ipcRenderer.invoke('watchlist:get'),
+    add: (item) => ipcRenderer.invoke('watchlist:add', item),
+    remove: (type, id) => ipcRenderer.invoke('watchlist:remove', { type, id }),
+    has: (type, id) => ipcRenderer.invoke('watchlist:has', { type, id }),
+  },
+
+  progress: {
+    continueWatching: (limit) => ipcRenderer.invoke('progress:continue', limit),
+    get: (type, videoId) => ipcRenderer.invoke('progress:get', { type, videoId }),
+    clear: (type, videoId) => ipcRenderer.invoke('progress:clear', { type, videoId }),
+    clearAll: () => ipcRenderer.invoke('progress:clearAll'),
+    stats: () => ipcRenderer.invoke('library:stats'),
   },
 
   engine: {

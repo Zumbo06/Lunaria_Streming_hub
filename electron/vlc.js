@@ -4,7 +4,10 @@
 // own VLC install as a detached process.
 
 const { spawn, execFile } = require('child_process')
+const crypto = require('crypto')
 const fs = require('fs')
+const http = require('http')
+const net = require('net')
 const os = require('os')
 const path = require('path')
 
@@ -135,17 +138,68 @@ function tokenizeArgs(input) {
   return matches.map((token) => token.replace(/^["']|["']$/g, ''))
 }
 
+function findFreePort(preferred) {
+  return new Promise((resolve) => {
+    const tester = net.createServer()
+    tester.once('error', () => resolve(preferred + Math.floor(Math.random() * 500) + 1))
+    tester.once('listening', () => {
+      const { port } = tester.address()
+      tester.close(() => resolve(port))
+    })
+    tester.listen(0, '127.0.0.1')
+  })
+}
+
 /**
  * Launches VLC on the resolved URL and detaches, so quitting Orion never kills
  * playback and VLC's stdio never blocks the main process (REQ-4.3).
+ *
+ * VLC's HTTP control interface is enabled on a loopback-bound random port with
+ * a random per-session password. That is the only way to learn the real
+ * playback position — Orion never decodes the media, so without it there is
+ * nothing to resume from.
  */
-function launch(streamUrl, { vlcPath, networkCaching = 3000, extraArgs = '' } = {}) {
+async function launch(
+  streamUrl,
+  {
+    vlcPath,
+    networkCaching = 3000,
+    extraArgs = '',
+    startTimeSeconds = 0,
+    enableControl = true,
+    subtitleFile = null,
+  } = {},
+) {
   if (!isExecutableFile(vlcPath)) {
-    return Promise.reject(new Error(`VLC executable not found at: ${vlcPath || '(unset)'}`))
+    throw new Error(`VLC executable not found at: ${vlcPath || '(unset)'}`)
   }
-  if (!streamUrl) return Promise.reject(new Error('No stream URL to play'))
+  if (!streamUrl) throw new Error('No stream URL to play')
 
-  const args = [streamUrl, `--network-caching=${Number(networkCaching) || 3000}`, ...tokenizeArgs(extraArgs)]
+  const args = [streamUrl, `--network-caching=${Number(networkCaching) || 3000}`]
+
+  let control = null
+  if (enableControl) {
+    control = {
+      port: await findFreePort(18080),
+      password: crypto.randomBytes(16).toString('hex'),
+    }
+    args.push(
+      '--extraintf', 'http',
+      '--http-host', '127.0.0.1',
+      '--http-port', String(control.port),
+      '--http-password', control.password,
+    )
+  }
+
+  if (startTimeSeconds > 0) args.push(`--start-time=${Math.floor(startTimeSeconds)}`)
+
+  // --sub-file takes a local path only, and --sub-autodetect-file would
+  // otherwise pull in unrelated .srt files sitting in the download folder.
+  if (subtitleFile && fs.existsSync(subtitleFile)) {
+    args.push(`--sub-file=${subtitleFile}`, '--no-sub-autodetect-file')
+  }
+
+  args.push(...tokenizeArgs(extraArgs))
 
   return new Promise((resolve, reject) => {
     const child = spawn(vlcPath, args, {
@@ -157,9 +211,72 @@ function launch(streamUrl, { vlcPath, networkCaching = 3000, extraArgs = '' } = 
     child.once('error', reject)
     child.once('spawn', () => {
       child.unref()
-      resolve({ pid: child.pid, vlcPath, args })
+      resolve({ pid: child.pid, vlcPath, args, control })
     })
   })
+}
+
+/**
+ * Reads VLC's playback state. Resolves null whenever the interface is not
+ * answering — VLC closed, still starting, or built without the http module —
+ * so callers treat "unknown" and "stopped" distinctly.
+ */
+function readStatus(control, timeoutMs = 2500) {
+  if (!control) return Promise.resolve(null)
+
+  return new Promise((resolve) => {
+    const req = http.get(
+      {
+        host: '127.0.0.1',
+        port: control.port,
+        path: '/requests/status.xml',
+        auth: `:${control.password}`,
+        timeout: timeoutMs,
+      },
+      (res) => {
+        if (res.statusCode !== 200) {
+          res.resume()
+          return resolve(null)
+        }
+
+        let body = ''
+        res.setEncoding('utf8')
+        res.on('data', (chunk) => {
+          body += chunk
+          if (body.length > 512 * 1024) req.destroy()
+        })
+        res.on('end', () => resolve(parseStatus(body)))
+      },
+    )
+
+    req.on('error', () => resolve(null))
+    req.on('timeout', () => {
+      req.destroy()
+      resolve(null)
+    })
+  })
+}
+
+/** VLC's status.xml is small and fixed-shape; a parser dependency is overkill. */
+function parseStatus(xml) {
+  const pick = (tag) => {
+    const match = new RegExp(`<${tag}>([^<]*)</${tag}>`).exec(xml)
+    return match ? match[1].trim() : null
+  }
+
+  const state = pick('state')
+  if (!state) return null
+
+  const time = Number(pick('time'))
+  const length = Number(pick('length'))
+  const position = Number(pick('position'))
+
+  return {
+    state, // playing | paused | stopped
+    timeSeconds: Number.isFinite(time) && time >= 0 ? time : 0,
+    lengthSeconds: Number.isFinite(length) && length > 0 ? length : 0,
+    position: Number.isFinite(position) ? position : 0,
+  }
 }
 
 function invalidateCache() {
@@ -169,6 +286,8 @@ function invalidateCache() {
 module.exports = {
   findVlc,
   launch,
+  readStatus,
+  parseStatus,
   isExecutableFile,
   normalizeCandidate,
   tokenizeArgs,

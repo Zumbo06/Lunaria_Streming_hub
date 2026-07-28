@@ -130,7 +130,7 @@ export default function PlayerProvider({ children }) {
   }, [pushToast])
 
   const play = useCallback(
-    async (stream) => {
+    async (stream, item, subtitle) => {
       setBusyStreamId(stream.id)
 
       if (stream.kind === 'p2p') {
@@ -138,13 +138,19 @@ export default function PlayerProvider({ children }) {
       }
 
       try {
-        const result = await playApi.stream(stream)
+        const result = await playApi.stream(stream, item, subtitle)
 
         if (result.ok) {
+          const parts = []
+          if (result.resumedAt > 0) {
+            parts.push(`resuming at ${Math.floor(result.resumedAt / 60)}m ${result.resumedAt % 60}s`)
+          }
+          if (result.subtitleLoaded) parts.push(`${subtitle.language} subtitles`)
+
           pushToast({
             tone: 'success',
             title: 'Handed to VLC',
-            message: stream.filename,
+            message: parts.length > 0 ? parts.join(' · ') : stream.filename,
           })
         } else if (result.code === 'VLC_NOT_FOUND') {
           setEngine(IDLE_ENGINE)

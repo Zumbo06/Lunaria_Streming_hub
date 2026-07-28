@@ -1,14 +1,25 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { AlertTriangle, ArrowLeft, Clock, Film, Loader2, Star, Tv } from 'lucide-react'
-import { formatRuntime, metaApi, nextRequestId, streamsApi } from '../api/orion.js'
+import {
+  AlertTriangle, ArrowLeft, Bookmark, BookmarkCheck, Captions, Clock, Film, Loader2, Star, Tv,
+} from 'lucide-react'
+import { formatRuntime, metaApi, nextRequestId, streamsApi, subtitlesApi, watchlistApi } from '../api/orion.js'
 import { usePlayer } from '../components/PlayerProvider.jsx'
 import StreamList from '../components/StreamList.jsx'
 import Badge from '../components/Badge.jsx'
 
+/** Looks up the episode number for the currently selected episode id. */
+function episodeNumberFor(seasons, selectedSeason, episodeId) {
+  if (!episodeId) return null
+  const season = seasons.find((entry) => entry.season === selectedSeason)
+  const video = season?.videos.find((item) => (item.id || '') === episodeId)
+  return video?.episode ?? null
+}
+
 /**
  * Detail panel: backdrop, metadata and the resolved stream links for the item
- * (UI 3.1). For a series the stream query is keyed to the selected episode id.
+ * (UI 3.1). For a series the stream and subtitle queries are both keyed to the
+ * selected episode id.
  */
 export default function Detail() {
   const { type, id } = useParams()
@@ -27,6 +38,11 @@ export default function Detail() {
   const [groups, setGroups] = useState([])
   const [streamErrors, setStreamErrors] = useState([])
   const [loadingStreams, setLoadingStreams] = useState(false)
+  const [language, setLanguage] = useState('all')
+  const [saved, setSaved] = useState(false)
+  const [subtitleGroups, setSubtitleGroups] = useState([])
+  const [loadingSubtitles, setLoadingSubtitles] = useState(false)
+  const [subtitleId, setSubtitleId] = useState('')
   const streamRequest = useRef(null)
 
   const isSeries = type === 'series'
@@ -116,11 +132,107 @@ export default function Detail() {
     }
   }, [type, streamTargetId])
 
+  // ---- Subtitles ----
+
+  useEffect(() => {
+    if (!streamTargetId) {
+      setSubtitleGroups([])
+      setSubtitleId('')
+      return undefined
+    }
+
+    let cancelled = false
+    setLoadingSubtitles(true)
+    setSubtitleGroups([])
+    setSubtitleId('')
+
+    subtitlesApi.get(type, streamTargetId).then((result) => {
+      if (cancelled) return
+      setSubtitleGroups(result.groups || [])
+      setLoadingSubtitles(false)
+    })
+
+    return () => {
+      cancelled = true
+    }
+  }, [type, streamTargetId])
+
+  const selectedSubtitle = useMemo(() => {
+    if (!subtitleId) return null
+    for (const group of subtitleGroups) {
+      const track = group.tracks.find((entry) => entry.id === subtitleId)
+      if (track) return track
+    }
+    return null
+  }, [subtitleId, subtitleGroups])
+
+  const subtitleCount = useMemo(
+    () => subtitleGroups.reduce((total, group) => total + group.tracks.length, 0),
+    [subtitleGroups],
+  )
+
+  // ---- Watchlist ----
+
+  useEffect(() => {
+    watchlistApi.has(type, decodedId).then(setSaved)
+  }, [type, decodedId])
+
+  const toggleWatchlist = useCallback(async () => {
+    if (saved) {
+      await watchlistApi.remove(type, decodedId)
+      setSaved(false)
+    } else {
+      await watchlistApi.add({
+        type,
+        id: decodedId,
+        name: meta?.name,
+        poster: meta?.poster,
+        releaseInfo: meta?.releaseInfo,
+      })
+      setSaved(true)
+    }
+  }, [saved, type, decodedId, meta])
+
+  // ---- Language filter ----
+
+  const availableLanguages = useMemo(() => {
+    const seen = new Set()
+    for (const group of groups) {
+      for (const stream of group.streams) {
+        for (const entry of stream.languages || []) seen.add(entry)
+      }
+    }
+    return [...seen].sort()
+  }, [groups])
+
+  const visibleGroups = useMemo(() => {
+    if (language === 'all') return groups
+    return groups
+      .map((group) => ({
+        ...group,
+        streams: group.streams.filter((stream) => (stream.languages || []).includes(language)),
+      }))
+      .filter((group) => group.streams.length > 0)
+  }, [groups, language])
+
+  const playItem = useMemo(
+    () => ({
+      type,
+      id: decodedId,
+      videoId: streamTargetId,
+      name: meta?.name,
+      poster: meta?.poster,
+      season: isSeries ? Number(selectedSeason) : null,
+      episode: isSeries ? episodeNumberFor(seasons, selectedSeason, episodeId) : null,
+    }),
+    [type, decodedId, streamTargetId, meta, isSeries, selectedSeason, seasons, episodeId],
+  )
+
   // ---- Render ----
 
   if (loadingMeta) {
     return (
-      <div className="mx-auto max-w-[1500px] px-6 py-8">
+      <div className="page py-8">
         <div className="flex gap-7">
           <div className="skeleton aspect-[2/3] w-[210px] shrink-0" />
           <div className="flex-1 space-y-3 pt-2">
@@ -177,7 +289,7 @@ export default function Detail() {
           <div className="absolute inset-0 bg-gradient-to-t from-ink-950 via-ink-950/90 to-ink-950/50" />
         </div>
 
-        <div className="relative mx-auto max-w-[1500px] px-6 pt-5">
+        <div className="relative page pt-5">
           <button
             type="button"
             onClick={() => navigate(-1)}
@@ -225,6 +337,19 @@ export default function Detail() {
                 <p className="mt-4 max-w-3xl text-[13.5px] leading-relaxed text-slate-300">{meta.description}</p>
               )}
 
+              <button
+                type="button"
+                onClick={toggleWatchlist}
+                className={`focus-ring mt-5 flex items-center gap-1.5 rounded-lg px-3.5 py-2 text-[13px] font-medium transition ${
+                  saved
+                    ? 'bg-accent/20 text-accent-soft ring-1 ring-accent/40 hover:bg-accent/30'
+                    : 'bg-ink-800/80 text-slate-200 ring-1 ring-white/10 backdrop-blur hover:bg-ink-700'
+                }`}
+              >
+                {saved ? <BookmarkCheck size={15} /> : <Bookmark size={15} />}
+                {saved ? 'In watchlist' : 'Add to watchlist'}
+              </button>
+
               <dl className="mt-4 space-y-1 text-[12px]">
                 {director.length > 0 && (
                   <div className="flex gap-2">
@@ -246,7 +371,7 @@ export default function Detail() {
 
       {/* Episodes */}
       {isSeries && seasons.length > 0 && (
-        <div className="mx-auto max-w-[1500px] px-6 pt-9">
+        <div className="page pt-9">
           <div className="mb-3 flex flex-wrap items-center gap-2">
             <h2 className="mr-2 text-[15px] font-semibold text-slate-100">Episodes</h2>
             {seasons.map((entry) => (
@@ -302,16 +427,71 @@ export default function Detail() {
       )}
 
       {/* Streams */}
-      <div className="mx-auto max-w-[1500px] px-6 pt-9">
-        <div className="mb-4 flex items-center gap-3">
+      <div className="page pt-9">
+        <div className="mb-4 flex flex-wrap items-center gap-3">
           <h2 className="text-[15px] font-semibold text-slate-100">Streams</h2>
           {loadingStreams && <Loader2 size={14} className="animate-spin text-accent" />}
           {!loadingStreams && groups.length > 0 && (
             <span className="text-[11px] uppercase tracking-wider text-ink-500">
+              {visibleGroups.reduce((total, group) => total + group.streams.length, 0)} of{' '}
               {groups.reduce((total, group) => total + group.streams.length, 0)} sources
             </span>
           )}
+
+          <div className="ml-auto flex flex-wrap items-center gap-4">
+            {availableLanguages.length > 0 && (
+              <div className="flex items-center gap-1.5">
+                <span className="text-[11px] uppercase tracking-wider text-ink-500">Audio</span>
+                <select
+                  value={language}
+                  onChange={(event) => setLanguage(event.target.value)}
+                  className="focus-ring rounded-lg bg-ink-850 px-2.5 py-1.5 text-[12px] text-slate-200 ring-1 ring-white/5 focus:bg-ink-800 focus:ring-accent/40"
+                >
+                  <option value="all">Any language</option>
+                  {availableLanguages.map((entry) => (
+                    <option key={entry} value={entry}>
+                      {entry}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            <div className="flex items-center gap-1.5">
+              <Captions size={13} className="text-ink-500" />
+              <span className="text-[11px] uppercase tracking-wider text-ink-500">Subtitles</span>
+              {loadingSubtitles ? (
+                <Loader2 size={13} className="animate-spin text-accent" />
+              ) : subtitleCount === 0 ? (
+                <span className="text-[12px] text-ink-500">None available</span>
+              ) : (
+                <select
+                  value={subtitleId}
+                  onChange={(event) => setSubtitleId(event.target.value)}
+                  className="focus-ring max-w-[230px] rounded-lg bg-ink-850 px-2.5 py-1.5 text-[12px] text-slate-200 ring-1 ring-white/5 focus:bg-ink-800 focus:ring-accent/40"
+                >
+                  <option value="">Off</option>
+                  {subtitleGroups.map((group) => (
+                    <optgroup key={group.language} label={`${group.language} (${group.tracks.length})`}>
+                      {group.tracks.map((track, index) => (
+                        <option key={track.id} value={track.id}>
+                          {track.label || `${group.language} · track ${index + 1}`}
+                        </option>
+                      ))}
+                    </optgroup>
+                  ))}
+                </select>
+              )}
+            </div>
+          </div>
         </div>
+
+        {selectedSubtitle && (
+          <p className="mb-3 flex items-center gap-1.5 text-[11.5px] text-accent-soft">
+            <Captions size={12} />
+            {selectedSubtitle.language} subtitles will be loaded into VLC with the stream.
+          </p>
+        )}
 
         {streamErrors.length > 0 && (
           <div className="mb-4 flex flex-col gap-1 rounded-lg border border-amber-500/20 bg-amber-500/5 px-4 py-3 text-[12px] text-amber-300">
@@ -340,8 +520,17 @@ export default function Detail() {
           <p className="rounded-lg bg-ink-850 px-4 py-6 text-center text-[13px] text-haze ring-1 ring-white/5">
             No stream addon returned a source for this title. Install or enable a stream addon in the addon manager.
           </p>
+        ) : visibleGroups.length === 0 ? (
+          <p className="rounded-lg bg-ink-850 px-4 py-6 text-center text-[13px] text-haze ring-1 ring-white/5">
+            No source advertises {language} audio. Note that many releases list no language at all — switch back to
+            “Any language” to see them.
+          </p>
         ) : (
-          <StreamList groups={groups} busyStreamId={busyStreamId} onPlay={play} />
+          <StreamList
+            groups={visibleGroups}
+            busyStreamId={busyStreamId}
+            onPlay={(stream) => play(stream, playItem, selectedSubtitle)}
+          />
         )}
       </div>
     </div>

@@ -56,6 +56,13 @@ function buildStreamUrl(addon, type, id) {
   return `${baseUrlOf(addon.manifestUrl)}/stream/${encodeURIComponent(type)}/${encodeURIComponent(id)}.json`
 }
 
+function buildSubtitlesUrl(addon, type, id, extra) {
+  const base = baseUrlOf(addon.manifestUrl)
+  const encoded = encodeExtra(extra)
+  const suffix = encoded ? `/${encoded}` : ''
+  return `${base}/subtitles/${encodeURIComponent(type)}/${encodeURIComponent(id)}${suffix}.json`
+}
+
 // ---- Fetching ----
 
 const cache = new Map()
@@ -264,6 +271,17 @@ async function fetchStreams(addon, type, id, timeoutMs) {
 }
 
 /**
+ * Subtitle addons (OpenSubtitles and friends) answer on the `subtitles`
+ * resource. Some of them use the `videoHash`/`videoSize` extras to match an
+ * exact release, so both are forwarded when known.
+ */
+async function fetchSubtitles(addon, type, id, extra, timeoutMs) {
+  const url = buildSubtitlesUrl(addon, type, id, extra)
+  const data = await fetchJson(url, { timeoutMs, ttlMs: 5 * 60 * 1000 })
+  return Array.isArray(data?.subtitles) ? data.subtitles : []
+}
+
+/**
  * Runs `task` against every addon at once and resolves with one entry per
  * addon, successes and failures alike. A single dead scraper must never hold
  * up the rest of the list (REQ-2.1, NFR 5.1).
@@ -285,6 +303,7 @@ module.exports = {
   buildCatalogUrl,
   buildMetaUrl,
   buildStreamUrl,
+  buildSubtitlesUrl,
   fetchManifest,
   toAddonRecord,
   getResourceDef,
@@ -297,6 +316,7 @@ module.exports = {
   fetchCatalog,
   fetchMeta,
   fetchStreams,
+  fetchSubtitles,
   fanOut,
   clearCache,
 }

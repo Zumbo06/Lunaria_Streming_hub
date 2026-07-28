@@ -1,23 +1,39 @@
 import { useEffect, useState } from 'react'
-import { Check, FolderOpen, Loader2, RotateCw, Search, ShieldCheck, ShieldOff, Trash2 } from 'lucide-react'
-import { appApi, settingsApi, vlcApi } from '../api/orion.js'
+import {
+  Check, FolderOpen, ImagePlus, Loader2, RotateCw, Search, ShieldCheck, ShieldOff, Trash2, UserPlus,
+} from 'lucide-react'
+import { appApi, progressApi, settingsApi, vlcApi } from '../api/orion.js'
 import { usePlayer } from '../components/PlayerProvider.jsx'
+import { useProfile } from '../components/ProfileProvider.jsx'
+import Avatar, { pickAvatarImage } from '../components/Avatar.jsx'
 
 export default function SettingsPage() {
   const { pushToast } = usePlayer()
+  const {
+    profiles,
+    current,
+    create: createProfile,
+    update: updateProfile,
+    remove: removeProfile,
+    select,
+  } = useProfile()
 
   const [settings, setSettings] = useState(null)
   const [info, setInfo] = useState(null)
+  const [stats, setStats] = useState(null)
   const [dirty, setDirty] = useState(false)
   const [saving, setSaving] = useState(false)
   const [detecting, setDetecting] = useState(false)
 
   useEffect(() => {
-    Promise.all([settingsApi.get(), appApi.info()]).then(([loadedSettings, loadedInfo]) => {
-      setSettings(loadedSettings)
-      setInfo(loadedInfo)
-    })
-  }, [])
+    Promise.all([settingsApi.get(), appApi.info(), progressApi.stats()]).then(
+      ([loadedSettings, loadedInfo, loadedStats]) => {
+        setSettings(loadedSettings)
+        setInfo(loadedInfo)
+        setStats(loadedStats)
+      },
+    )
+  }, [current?.id])
 
   function update(patch) {
     setSettings((current) => ({ ...current, ...patch }))
@@ -34,6 +50,8 @@ export default function SettingsPage() {
       downloadDir: settings.downloadDir || null,
       keepDownloads: Boolean(settings.keepDownloads),
       addonTimeoutMs: Number(settings.addonTimeoutMs) || 8000,
+      trackProgress: settings.trackProgress !== false,
+      resumePlayback: settings.resumePlayback !== false,
       headBufferBytes: Number(settings.headBufferBytes) || 4 * 1024 * 1024,
       tailBufferBytes: Number(settings.tailBufferBytes) || 8 * 1024 * 1024,
       readaheadBytes: Number(settings.readaheadBytes) || 24 * 1024 * 1024,
@@ -96,6 +114,123 @@ export default function SettingsPage() {
     <div className="mx-auto max-w-3xl px-6 py-8 pb-28">
       <h1 className="text-lg font-semibold text-slate-100">Settings</h1>
       <p className="mt-1 text-[13px] text-haze">Playback is handed to VLC; Orion never decodes media itself.</p>
+
+      <Section title="Profiles" subtitle="Each profile keeps its own watchlist and watch history.">
+        <div className="space-y-2">
+          {profiles.map((profile) => (
+            <div
+              key={profile.id}
+              className={`flex items-center gap-3 rounded-lg p-2.5 ring-1 transition ${
+                profile.id === current?.id ? 'bg-accent/10 ring-accent/30' : 'bg-ink-850 ring-white/5'
+              }`}
+            >
+              <Avatar profile={profile} size={36} className="shrink-0" />
+
+              <button
+                type="button"
+                onClick={async () => {
+                  const result = await pickAvatarImage()
+                  if (result.dataUrl) updateProfile({ id: profile.id, avatarImage: result.dataUrl })
+                  else if (result.error) pushToast({ tone: 'error', title: 'Image not usable', message: result.error })
+                }}
+                aria-label={`Set a picture for ${profile.name}`}
+                title="Use a local image"
+                className="focus-ring shrink-0 rounded p-1 text-ink-500 transition hover:text-slate-200"
+              >
+                <ImagePlus size={14} />
+              </button>
+
+              {profile.avatarImage && (
+                <button
+                  type="button"
+                  onClick={() => updateProfile({ id: profile.id, avatarImage: null })}
+                  aria-label={`Remove picture for ${profile.name}`}
+                  title="Remove picture"
+                  className="focus-ring shrink-0 rounded p-1 text-ink-500 transition hover:text-rose-300"
+                >
+                  <Trash2 size={13} />
+                </button>
+              )}
+
+              <input
+                value={profile.name}
+                onChange={(event) => updateProfile({ id: profile.id, name: event.target.value })}
+                maxLength={40}
+                aria-label={`Name for ${profile.name}`}
+                className="focus-ring min-w-0 flex-1 rounded-md bg-transparent px-2 py-1 text-[13px] font-medium text-slate-200 hover:bg-ink-800 focus:bg-ink-800"
+              />
+
+              {profile.id === current?.id ? (
+                <span className="shrink-0 text-[11px] uppercase tracking-wider text-accent-soft">Active</span>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => select(profile.id)}
+                  className="focus-ring shrink-0 rounded-md px-2.5 py-1 text-[12px] font-medium text-haze transition hover:bg-ink-800 hover:text-slate-200"
+                >
+                  Use
+                </button>
+              )}
+
+              <button
+                type="button"
+                disabled={profiles.length <= 1}
+                onClick={async () => {
+                  const result = await removeProfile(profile.id)
+                  if (result?.ok === false) pushToast({ tone: 'error', title: 'Cannot remove', message: result.error })
+                }}
+                aria-label={`Delete ${profile.name}`}
+                className="focus-ring shrink-0 rounded p-1 text-ink-500 transition enabled:hover:text-rose-300 disabled:opacity-30"
+              >
+                <Trash2 size={14} />
+              </button>
+            </div>
+          ))}
+        </div>
+
+        <button
+          type="button"
+          onClick={() => createProfile({ name: `Profile ${profiles.length + 1}`, avatar: '👤' })}
+          className="focus-ring flex items-center gap-1.5 rounded-lg bg-ink-800 px-3 py-2 text-[12px] font-medium text-slate-200 transition hover:bg-ink-700"
+        >
+          <UserPlus size={13} />
+          Add profile
+        </button>
+
+        {stats && (
+          <p className="text-[11.5px] text-ink-500">
+            {current?.name}: {stats.watchlistCount} in watchlist · {stats.inProgress} in progress ·{' '}
+            {stats.finished} finished · library {stats.encrypted ? 'encrypted' : 'stored in plain text'}
+          </p>
+        )}
+      </Section>
+
+      <Section title="Watch history" subtitle="Positions come from VLC itself while a stream is playing.">
+        <Toggle
+          label="Track playback position"
+          hint="Enables VLC's local control interface on a random port with a random password. Without it, Continue watching stays empty."
+          checked={settings.trackProgress !== false}
+          onChange={() => update({ trackProgress: settings.trackProgress === false })}
+        />
+        <Toggle
+          label="Resume where I left off"
+          hint="Starts VLC at the saved position when you replay something you already began."
+          checked={settings.resumePlayback !== false}
+          onChange={() => update({ resumePlayback: settings.resumePlayback === false })}
+        />
+        <button
+          type="button"
+          onClick={async () => {
+            await progressApi.clearAll()
+            setStats(await progressApi.stats())
+            pushToast({ tone: 'success', title: 'Watch history cleared', message: current?.name })
+          }}
+          className="focus-ring flex items-center gap-1.5 rounded-lg bg-ink-800 px-3 py-2 text-[12px] font-medium text-slate-200 transition hover:bg-rose-500/20 hover:text-rose-200"
+        >
+          <Trash2 size={13} />
+          Clear this profile’s watch history
+        </button>
+      </Section>
 
       <Section title="VLC" subtitle="The external player every stream is sent to.">
         <Field label="Executable" hint="Left blank, Orion scans the standard install locations for this platform.">
@@ -342,6 +477,33 @@ function Field({ label, hint, children }) {
       <label className="mb-1.5 block text-[12px] font-medium text-slate-300">{label}</label>
       {children}
       {hint && <p className="mt-1.5 text-[11.5px] leading-snug text-ink-500">{hint}</p>}
+    </div>
+  )
+}
+
+function Toggle({ label, hint, checked, onChange }) {
+  return (
+    <div className="flex items-start gap-3">
+      <button
+        type="button"
+        role="switch"
+        aria-checked={checked}
+        aria-label={label}
+        onClick={onChange}
+        className={`focus-ring relative mt-0.5 h-5 w-9 shrink-0 rounded-full transition ${
+          checked ? 'bg-accent/70' : 'bg-ink-600'
+        }`}
+      >
+        <span
+          className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-all ${
+            checked ? 'left-[18px]' : 'left-0.5'
+          }`}
+        />
+      </button>
+      <div className="min-w-0">
+        <p className="text-[12px] font-medium text-slate-300">{label}</p>
+        {hint && <p className="mt-0.5 text-[11.5px] leading-snug text-ink-500">{hint}</p>}
+      </div>
     </div>
   )
 }

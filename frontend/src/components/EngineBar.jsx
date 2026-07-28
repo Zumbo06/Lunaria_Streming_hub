@@ -33,7 +33,7 @@ export default function EngineBar({ engine, onStop }) {
 
   return (
     <div className="fixed inset-x-0 bottom-0 z-40 border-t border-white/10 bg-ink-900/95 backdrop-blur">
-      <div className="mx-auto flex max-w-[1500px] items-center gap-4 px-6 py-3">
+      <div className="page flex items-center gap-4 px-6 py-3">
         <div className="shrink-0 text-accent">
           {settled ? <Radio size={18} /> : <Loader2 size={18} className="animate-spin" />}
         </div>

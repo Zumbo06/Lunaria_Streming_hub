@@ -23,7 +23,11 @@ const api = bridge || {
   search: noBridge,
   meta: noBridge,
   streams: noBridge,
+  subtitles: noBridge,
   play: noBridge,
+  profiles: noBridge,
+  watchlist: noBridge,
+  progress: noBridge,
   engine: noBridge,
   vlc: noBridge,
 }
@@ -35,7 +39,11 @@ export const catalogApi = api.catalog
 export const searchApi = api.search
 export const metaApi = api.meta
 export const streamsApi = api.streams
+export const subtitlesApi = api.subtitles
 export const playApi = api.play
+export const profilesApi = api.profiles
+export const watchlistApi = api.watchlist
+export const progressApi = api.progress
 export const engineApi = api.engine
 export const vlcApi = api.vlc
 
@@ -60,6 +68,15 @@ export function formatBytes(bytes) {
 export function formatSpeed(bytesPerSecond) {
   const formatted = formatBytes(bytesPerSecond)
   return formatted ? `${formatted}/s` : '0 B/s'
+}
+
+export function formatRemaining(positionSeconds, durationSeconds) {
+  const left = Math.max(0, (durationSeconds || 0) - (positionSeconds || 0))
+  if (left < 30) return null
+
+  const minutes = Math.round(left / 60)
+  if (minutes < 60) return `${minutes}m left`
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m left`
 }
 
 export function formatRuntime(runtime) {
