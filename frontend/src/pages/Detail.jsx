@@ -27,7 +27,7 @@ function episodeNumberFor(seasons, selectedSeason, episodeId) {
 export default function Detail() {
   const { type, id } = useParams()
   const navigate = useNavigate()
-  const { play, busyStreamId } = usePlayer()
+  const { play, busyStreamId, engine, applySubtitleNow } = usePlayer()
 
   const decodedId = decodeURIComponent(id)
 
@@ -521,6 +521,18 @@ export default function Detail() {
               <Captions size={12} />
               {selectedSubtitle.language} subtitles
             </span>
+          )}
+
+          {/* mpv can take a subtitle over IPC while playing; VLC cannot. */}
+          {selectedSubtitle && playerInfo?.selected === 'mpv' && engine.active && (
+            <button
+              type="button"
+              onClick={() => applySubtitleNow(selectedSubtitle)}
+              className="focus-ring flex items-center gap-1.5 rounded-md bg-accent/15 px-2.5 py-1 text-[11.5px] font-medium text-accent-soft ring-1 ring-accent/30 transition hover:bg-accent/25"
+            >
+              <Captions size={12} />
+              Load into mpv now
+            </button>
           )}
         </div>
 

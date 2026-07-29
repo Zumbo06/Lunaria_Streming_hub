@@ -875,8 +875,18 @@ ipcMain.handle('mpvconf:status', async () => {
     mpvPath,
     ...mpvconf.read(mpvPath),
     shadow: mpvconf.shadowedUserConfig(),
-    preview: mpvconf.renderBlock({ toneMap: settings.hdrToneMap || 'passthrough' }),
+    preview: mpvconf.renderBlock({
+      passthrough: settings.hdrPassthrough !== false,
+      toneMap: settings.hdrToneMap || 'clip',
+      customOptions: settings.mpvHdrOptions || '',
+    }),
   }
+})
+
+ipcMain.handle('mpvconf:validate', async (event, text) => {
+  const mpvPath = await resolvedMpvPath()
+  if (!mpvPath) return { ok: false, error: 'mpv was not found', results: [] }
+  return require('./mpv').validateOptions(mpvPath, text)
 })
 
 ipcMain.handle('mpvconf:write', async (event, options) => {
@@ -884,10 +894,26 @@ ipcMain.handle('mpvconf:write', async (event, options) => {
   if (!mpvPath) return { ok: false, error: 'mpv was not found' }
 
   const settings = config.getSettings()
+  const customOptions = options?.customOptions ?? settings.mpvHdrOptions ?? ''
+
+  // Refuse to write an option mpv would silently ignore.
+  if (customOptions.trim()) {
+    const validation = await require('./mpv').validateOptions(mpvPath, customOptions)
+    if (!validation.ok) {
+      return {
+        ok: false,
+        error: 'Some of your extra options are not valid for this mpv build',
+        results: validation.results.filter((entry) => !entry.ok),
+      }
+    }
+  }
+
   try {
     const result = mpvconf.write(mpvPath, {
-      toneMap: options?.toneMap || settings.hdrToneMap || 'passthrough',
+      passthrough: options?.passthrough ?? settings.hdrPassthrough !== false,
+      toneMap: options?.toneMap || settings.hdrToneMap || 'clip',
       exclusiveFullscreen: Boolean(options?.exclusiveFullscreen),
+      customOptions,
     })
     return { ok: true, ...result, shadow: mpvconf.shadowedUserConfig() }
   } catch (err) {
@@ -1005,6 +1031,30 @@ ipcMain.handle('progress:clear', (event, { type, videoId }) =>
 ipcMain.handle('progress:clearAll', () => library.clearAllProgress(activeProfileId()))
 
 ipcMain.handle('library:stats', () => library.stats(activeProfileId()))
+
+/**
+ * Loads a subtitle into the player that is already running. mpv can take one
+ * over its IPC channel; VLC's HTTP interface has no equivalent, so there the
+ * track has to be chosen before playback starts.
+ */
+ipcMain.handle('play:addSubtitle', async (event, subtitle) => {
+  if (!playbackSession) return { ok: false, error: 'Nothing is playing' }
+  if (playbackSession.playerId !== 'mpv') {
+    return { ok: false, error: 'VLC cannot load a subtitle mid-playback — pick one before pressing play' }
+  }
+  if (!subtitle?.url) return { ok: false, error: 'That subtitle has no URL' }
+
+  try {
+    const file = await subtitlesLib.download(subtitle.url)
+    const result = await require('./mpv').addSubtitle(playbackSession.control, file, subtitle.language || 'Orion')
+    if (!result.ok) return { ok: false, error: result.error }
+
+    broadcast('play:status', { phase: 'subtitle-added', subtitle: subtitle.language })
+    return { ok: true, language: subtitle.language }
+  } catch (err) {
+    return { ok: false, error: err.message }
+  }
+})
 
 ipcMain.handle('engine:stop', () => {
   engineStop()

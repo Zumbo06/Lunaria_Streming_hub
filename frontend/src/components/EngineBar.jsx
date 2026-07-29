@@ -4,7 +4,7 @@ import { formatBytes, formatSpeed } from '../api/orion.js'
 const PHASE_LABEL = {
   connecting: 'Connecting to swarm',
   buffering: 'Buffering head of file',
-  streaming: 'Streaming to VLC',
+  streaming: 'Streaming to the player',
 }
 
 /**

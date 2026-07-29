@@ -108,7 +108,11 @@ function readStatus(id, control, timeoutMs) {
 function hdrArgsFor(id, hdr, settings) {
   if (!hdr?.isHdr) return []
   if (id === 'mpv') {
-    return mpv.hdrArgs({ hdrFormat: hdr.format, toneMap: settings?.hdrToneMap || 'passthrough' })
+    return mpv.hdrArgs({
+      hdrFormat: hdr.format,
+      toneMap: settings?.hdrToneMap || 'clip',
+      passthrough: settings?.hdrPassthrough !== false,
+    })
   }
   return vlc.hdrArgs()
 }

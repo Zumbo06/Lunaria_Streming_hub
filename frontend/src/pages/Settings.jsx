@@ -47,10 +47,40 @@ export default function SettingsPage() {
   // The preview reflects the chosen tone-mapping mode, so refresh on change.
   useEffect(() => {
     if (settings?.hdrToneMap) playersApi.mpvConfigStatus().then(setMpvConf)
-  }, [settings?.hdrToneMap, settings?.mpvPath])
+  }, [settings?.hdrToneMap, settings?.hdrPassthrough, settings?.mpvPath, settings?.mpvHdrOptions])
+
+  async function checkMpvOptions() {
+    const result = await playersApi.validateMpvOptions(settings.mpvHdrOptions || '')
+    const bad = (result.results || []).filter((entry) => !entry.ok)
+
+    pushToast(
+      bad.length === 0
+        ? { tone: 'success', title: 'All options valid', message: 'mpv accepts every line.' }
+        : {
+            tone: 'error',
+            title: `${bad.length} option${bad.length === 1 ? '' : 's'} mpv does not know`,
+            message: bad.map((entry) => entry.line).join(', '),
+            duration: 0,
+          },
+    )
+  }
 
   async function writeMpvConf() {
-    const result = await playersApi.writeMpvConfig({ toneMap: settings.hdrToneMap || 'passthrough' })
+    const result = await playersApi.writeMpvConfig({
+      passthrough: settings.hdrPassthrough !== false,
+      toneMap: settings.hdrToneMap || 'clip',
+      customOptions: settings.mpvHdrOptions || '',
+    })
+
+    if (!result.ok && result.results?.length) {
+      pushToast({
+        tone: 'error',
+        title: 'Not written — invalid options',
+        message: result.results.map((entry) => entry.line).join(', '),
+        duration: 0,
+      })
+      return
+    }
     if (result.ok) {
       setMpvConf(await playersApi.mpvConfigStatus())
       pushToast({
@@ -81,6 +111,11 @@ export default function SettingsPage() {
     playersApi.revealMpvConfig()
   }
 
+  // Every label below names the player that is actually selected, rather than
+  // assuming VLC.
+  const isMpv = (settings?.player || 'vlc') === 'mpv'
+  const playerName = isMpv ? 'mpv' : 'VLC'
+
   function update(patch) {
     setSettings((current) => ({ ...current, ...patch }))
     setDirty(true)
@@ -93,7 +128,8 @@ export default function SettingsPage() {
       vlcPath: settings.vlcPath || null,
       mpvPath: settings.mpvPath || null,
       hdrMode: settings.hdrMode || 'auto',
-      hdrToneMap: settings.hdrToneMap || 'passthrough',
+      hdrPassthrough: settings.hdrPassthrough !== false,
+      hdrToneMap: settings.hdrToneMap || 'clip',
       networkCaching: Number(settings.networkCaching) || 3000,
       vlcExtraArgs: settings.vlcExtraArgs || '',
       mpvExtraArgs: settings.mpvExtraArgs || '',
@@ -101,6 +137,7 @@ export default function SettingsPage() {
       downloadDir: settings.downloadDir || null,
       keepDownloads: Boolean(settings.keepDownloads),
       addonTimeoutMs: Number(settings.addonTimeoutMs) || 8000,
+      mpvHdrOptions: settings.mpvHdrOptions || '',
       trackProgress: settings.trackProgress !== false,
       resumePlayback: settings.resumePlayback !== false,
       headBufferBytes: Number(settings.headBufferBytes) || 4 * 1024 * 1024,
@@ -170,7 +207,9 @@ export default function SettingsPage() {
   return (
     <div className="mx-auto max-w-3xl px-6 py-8 pb-28">
       <h1 className="text-lg font-semibold text-slate-100">Settings</h1>
-      <p className="mt-1 text-[13px] text-haze">Playback is handed to VLC; Orion never decodes media itself.</p>
+      <p className="mt-1 text-[13px] text-haze">
+        Playback is handed to {playerName}; Orion never decodes media itself.
+      </p>
 
       <Section title="Profiles" subtitle="Each profile keeps its own watchlist and watch history.">
         <div className="space-y-2">
@@ -262,16 +301,20 @@ export default function SettingsPage() {
         )}
       </Section>
 
-      <Section title="Watch history" subtitle="Positions come from VLC itself while a stream is playing.">
+      <Section title="Watch history" subtitle={`Positions come from ${playerName} itself while a stream is playing.`}>
         <Toggle
           label="Track playback position"
-          hint="Enables VLC's local control interface on a random port with a random password. Without it, Continue watching stays empty."
+          hint={
+            isMpv
+              ? 'Enables mpv’s JSON IPC on a private named pipe. Without it, Continue watching stays empty.'
+              : 'Enables VLC’s local control interface on a random port with a random password. Without it, Continue watching stays empty.'
+          }
           checked={settings.trackProgress !== false}
           onChange={() => update({ trackProgress: settings.trackProgress === false })}
         />
         <Toggle
           label="Resume where I left off"
-          hint="Starts VLC at the saved position when you replay something you already began."
+          hint={`Starts ${playerName} at the saved position (${isMpv ? '--start' : '--start-time'}) when you replay something you already began.`}
           checked={settings.resumePlayback !== false}
           onChange={() => update({ resumePlayback: settings.resumePlayback === false })}
         />
@@ -428,26 +471,60 @@ export default function SettingsPage() {
           </div>
         </Field>
 
+        {isMpv && (
+          <Toggle
+            label="Announce HDR to the display (passthrough)"
+            hint="On for an HDR display with Windows HDR enabled — mpv requests a PQ swapchain and sends the source metadata through. Turn it off only for a genuinely SDR display."
+            checked={settings.hdrPassthrough !== false}
+            onChange={() => update({ hdrPassthrough: settings.hdrPassthrough === false })}
+          />
+        )}
+
         <Field
-          label="Tone mapping"
+          label="Tone-mapping curve"
           hint={
-            (settings.player || 'vlc') === 'mpv'
-              ? 'Passthrough sends HDR untouched to an HDR display. Pick a curve to map it down for an SDR display.'
+            isMpv
+              ? 'Independent of passthrough: an HDR display still needs a curve for whatever peak brightness it cannot reach. `clip` leaves that entirely to the display.'
               : 'mpv only. VLC 3 has no tone-mapping controls — it can pass HDR through to an HDR display and nothing more.'
           }
         >
           <select
-            value={settings.hdrToneMap || 'passthrough'}
+            value={settings.hdrToneMap || 'clip'}
             onChange={(event) => update({ hdrToneMap: event.target.value })}
-            disabled={(settings.player || 'vlc') !== 'mpv'}
-            className="focus-ring w-56 rounded-lg bg-ink-850 px-3 py-2 text-[13px] text-slate-200 ring-1 ring-white/5 focus:bg-ink-800 focus:ring-accent/40 disabled:opacity-40"
+            disabled={!isMpv}
+            className="focus-ring w-72 rounded-lg bg-ink-850 px-3 py-2 text-[13px] text-slate-200 ring-1 ring-white/5 focus:bg-ink-800 focus:ring-accent/40 disabled:opacity-40"
           >
-            <option value="passthrough">Passthrough (HDR display)</option>
+            <option value="clip">clip — let the display map it</option>
+            <option value="st2094-40">st2094-40 — HDR10+ dynamic metadata</option>
             <option value="bt.2446a">bt.2446a — ITU reference</option>
+            <option value="bt.2390">bt.2390 — EBU reference</option>
             <option value="spline">spline — balanced</option>
             <option value="hable">hable — filmic</option>
             <option value="reinhard">reinhard — soft</option>
           </select>
+        </Field>
+
+        <Field
+          label="Extra mpv HDR options"
+          hint="One per line, without the leading dashes (e.g. gamut-mapping-mode=perceptual). Kept inside the managed block across rewrites, and checked against your mpv build before anything is written."
+        >
+          <textarea
+            rows={3}
+            value={settings.mpvHdrOptions || ''}
+            onChange={(event) => update({ mpvHdrOptions: event.target.value })}
+            placeholder={'gamut-mapping-mode=perceptual\ntarget-contrast=auto'}
+            spellCheck={false}
+            className="focus-ring w-full resize-y rounded-lg bg-ink-850 px-3 py-2 font-mono text-[12px] text-slate-200 placeholder:text-ink-500 ring-1 ring-white/5 focus:bg-ink-800 focus:ring-accent/40"
+          />
+          <button
+            type="button"
+            onClick={checkMpvOptions}
+            disabled={!settings.mpvHdrOptions?.trim()}
+            className="focus-ring mt-2 flex items-center gap-1.5 rounded-lg bg-ink-800 px-3 py-2 text-[12px] font-medium text-slate-200 transition hover:bg-ink-700 disabled:opacity-40"
+          >
+            <Check size={13} />
+            Check these against mpv
+          </button>
         </Field>
 
         <p className="rounded-lg bg-ink-850 px-3.5 py-2.5 text-[11.5px] leading-relaxed text-haze ring-1 ring-white/5">
@@ -456,7 +533,8 @@ export default function SettingsPage() {
           if Windows itself is in HDR mode.
           <br />
           <strong className="text-slate-300">mpv:</strong> adds{' '}
-          <code className="text-accent-soft">--vo=gpu-next --gpu-api=d3d11</code> plus passthrough or your chosen curve.
+          <code className="text-accent-soft">--vo=gpu-next --gpu-api=d3d11 --hwdec=auto-safe</code>, the passthrough
+          hint, and your chosen curve.
         </p>
 
         {mpvConf?.ok && (
@@ -548,7 +626,7 @@ export default function SettingsPage() {
         </Field>
       </Section>
 
-      <Section title="P2P engine" subtitle="The local loopback gateway that feeds torrent bytes to VLC.">
+      <Section title="P2P engine" subtitle={`The local loopback gateway that feeds torrent bytes to ${playerName}.`}>
         <Field label="Gateway port" hint="Orion moves to the next free port if this one is taken.">
           <input
             type="number"
@@ -560,7 +638,7 @@ export default function SettingsPage() {
           />
         </Field>
 
-        <Field label="Buffer before launching (MB)" hint="How much of the file head must land before VLC is opened.">
+        <Field label="Buffer before launching (MB)" hint={`How much of the file head must land before ${playerName} is opened.`}>
           <input
             type="number"
             min={1}
@@ -573,7 +651,7 @@ export default function SettingsPage() {
 
         <Field
           label="Index buffer at end of file (MB)"
-          hint="MP4 and MKV both keep their seek index at the end, and VLC reads it before playing a single frame. Lower it only if sources are slow to start; too low and playback will not begin."
+          hint={`MP4 and MKV both keep their seek index at the end, and ${playerName} reads it before playing a single frame. Lower it only if sources are slow to start; too low and playback will not begin.`}
         >
           <input
             type="number"
@@ -587,7 +665,7 @@ export default function SettingsPage() {
 
         <Field
           label="Buffer timeout (seconds)"
-          hint="How long to wait for the opening and the index before giving up. Orion refuses to open VLC on a stream that is not ready, so a slow swarm reports an error here rather than a player that never starts."
+          hint={`How long to wait for the opening and the index before giving up. Orion refuses to open ${playerName} on a stream that is not ready, so a slow swarm reports an error here rather than a player that never starts.`}
         >
           <input
             type="number"

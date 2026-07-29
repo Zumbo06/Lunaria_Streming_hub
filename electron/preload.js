@@ -66,6 +66,7 @@ contextBridge.exposeInMainWorld('orion', {
     stream: (stream, item, subtitle, playerOverride) =>
       ipcRenderer.invoke('play:stream', { stream, item, subtitle, playerOverride }),
     onStatus: (handler) => subscribe('play:status', handler),
+    addSubtitle: (subtitle) => ipcRenderer.invoke('play:addSubtitle', subtitle),
     onProgress: (handler) => subscribe('playback:progress', handler),
     onEnded: (handler) => subscribe('playback:ended', handler),
   },
@@ -107,6 +108,7 @@ contextBridge.exposeInMainWorld('orion', {
     portable: () => ipcRenderer.invoke('players:portable'),
     mpvConfigStatus: () => ipcRenderer.invoke('mpvconf:status'),
     writeMpvConfig: (options) => ipcRenderer.invoke('mpvconf:write', options),
+    validateMpvOptions: (text) => ipcRenderer.invoke('mpvconf:validate', text),
     removeMpvConfig: () => ipcRenderer.invoke('mpvconf:remove'),
     revealMpvConfig: () => ipcRenderer.invoke('mpvconf:reveal'),
     preview: (stream) => ipcRenderer.invoke('players:preview', stream),

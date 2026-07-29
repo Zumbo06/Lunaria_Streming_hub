@@ -178,14 +178,28 @@ export default function PlayerProvider({ children }) {
     [locatePlayer, pushToast],
   )
 
+  /** Pushes a subtitle into the running player without restarting the stream. */
+  const applySubtitleNow = useCallback(
+    async (subtitle) => {
+      const result = await playApi.addSubtitle(subtitle)
+      pushToast(
+        result.ok
+          ? { tone: 'success', title: 'Subtitle loaded', message: `${result.language} track added to mpv` }
+          : { tone: 'error', title: 'Could not load subtitle', message: result.error },
+      )
+      return result
+    },
+    [pushToast],
+  )
+
   const stopEngine = useCallback(async () => {
     await engineApi.stop()
     setEngine(IDLE_ENGINE)
   }, [])
 
   const value = useMemo(
-    () => ({ play, stopEngine, busyStreamId, engine, pushToast, locatePlayer }),
-    [play, stopEngine, busyStreamId, engine, pushToast, locatePlayer],
+    () => ({ play, stopEngine, busyStreamId, engine, pushToast, locatePlayer, applySubtitleNow }),
+    [play, stopEngine, busyStreamId, engine, pushToast, locatePlayer, applySubtitleNow],
   )
 
   return (

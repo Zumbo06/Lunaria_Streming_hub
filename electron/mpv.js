@@ -122,6 +122,45 @@ function scanPortable() {
   return found
 }
 
+/**
+ * Asks mpv whether it accepts each `key=value` line. mpv reports unknown
+ * options in a config file as an error and then carries on, so a typo or an
+ * option removed in a newer release sits there doing nothing — exactly the
+ * failure mode this catches before anything is written to disk.
+ */
+async function validateOptions(mpvPath, text) {
+  const lines = String(text || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith('#') && !line.startsWith('['))
+
+  if (!isExecutableFile(mpvPath)) return { ok: false, error: 'mpv not found', results: [] }
+
+  const results = await Promise.all(
+    lines.map(
+      (line) =>
+        new Promise((resolve) => {
+          execFile(
+            mpvPath,
+            ['--no-config', `--${line}`, '--version'],
+            { windowsHide: true, timeout: 10000 },
+            (err, stdout, stderr) => {
+              const output = `${stdout || ''}${stderr || ''}`
+              const bad = /Error parsing option|option not found|Unknown option/i.exec(output)
+              resolve({
+                line,
+                ok: !bad,
+                error: bad ? (output.match(/Error parsing option[^\n]*/) || [bad[0]])[0].trim() : null,
+              })
+            },
+          )
+        }),
+    ),
+  )
+
+  return { ok: results.every((entry) => entry.ok), results }
+}
+
 /** Confirms a path really is mpv, and reports its version. */
 function verify(candidate) {
   return new Promise((resolve) => {
@@ -235,19 +274,32 @@ function tokenizeArgs(input) {
  * passthrough  — send HDR to the display untouched. Correct on an HDR monitor.
  * tone-mapped  — map HDR down to SDR with a named curve, for an SDR display.
  */
-function hdrArgs({ hdrFormat, toneMap = 'passthrough' }) {
+// mpv 0.41's accepted values. Anything else — including the legacy
+// "passthrough" setting, which was never a curve — is coerced to `clip` rather
+// than emitted and rejected at launch.
+const TONE_CURVES = new Set([
+  'auto', 'clip', 'mobius', 'reinhard', 'hable', 'gamma',
+  'linear', 'spline', 'bt.2390', 'bt.2446a', 'st2094-40',
+])
+
+function normalizeCurve(value) {
+  return TONE_CURVES.has(value) ? value : 'clip'
+}
+
+function hdrArgs({ hdrFormat, toneMap: requestedCurve = 'clip', passthrough = true }) {
+  const toneMap = normalizeCurve(requestedCurve)
   // mpv decodes in software unless told otherwise, which is punishing for the
   // 4K HEVC that HDR releases almost always are.
   const args = ['--vo=gpu-next', '--hwdec=auto-safe']
 
   if (process.platform === 'win32') args.push('--gpu-api=d3d11')
 
-  if (toneMap === 'passthrough') {
-    // Hands the display the source colorimetry and HDR metadata as-is.
-    args.push('--target-colorspace-hint=yes')
-  } else {
-    args.push(`--tone-mapping=${toneMap}`, '--hdr-compute-peak=yes')
-  }
+  // The passthrough hint and the tone-mapping curve are independent: an HDR
+  // display still needs a curve for whatever it cannot reach.
+  args.push(passthrough ? '--target-colorspace-hint=yes' : '--target-colorspace-hint=no')
+  args.push(`--tone-mapping=${toneMap}`)
+
+  if (toneMap !== 'clip') args.push('--hdr-compute-peak=yes')
 
   // Dolby Vision deliberately gets no extra flag: libplacebo applies the
   // dynamic metadata itself under gpu-next, and mpv exposes no DV-specific
@@ -397,11 +449,89 @@ function readStatus(control, timeoutMs = 2500) {
   })
 }
 
+/**
+ * Sends a command to a running mpv and waits for its reply. Used to change
+ * things mid-playback rather than only at launch.
+ */
+function command(control, args, timeoutMs = 3000) {
+  if (!control?.pipe) return Promise.resolve({ ok: false, error: 'mpv is not running' })
+
+  return new Promise((resolve) => {
+    let settled = false
+    const finish = (value) => {
+      if (settled) return
+      settled = true
+      try {
+        socket.destroy()
+      } catch {
+        /* already gone */
+      }
+      resolve(value)
+    }
+
+    const socket = net.connect({ path: control.pipe })
+    const timer = setTimeout(() => finish({ ok: false, error: 'mpv did not answer' }), timeoutMs)
+    let buffer = ''
+
+    socket.on('connect', () => {
+      socket.write(`${JSON.stringify({ command: args, request_id: 1 })}\n`)
+    })
+
+    socket.on('data', (chunk) => {
+      buffer += chunk.toString('utf8')
+      let newline
+      while ((newline = buffer.indexOf('\n')) !== -1) {
+        const line = buffer.slice(0, newline).trim()
+        buffer = buffer.slice(newline + 1)
+        if (!line) continue
+
+        let message
+        try {
+          message = JSON.parse(line)
+        } catch {
+          continue
+        }
+        if (message.request_id !== 1) continue
+
+        clearTimeout(timer)
+        finish(
+          message.error === 'success'
+            ? { ok: true, data: message.data }
+            : { ok: false, error: message.error || 'mpv rejected the command' },
+        )
+      }
+    })
+
+    socket.on('error', (err) => {
+      clearTimeout(timer)
+      finish({ ok: false, error: err.message })
+    })
+    socket.on('close', () => {
+      clearTimeout(timer)
+      finish({ ok: false, error: 'mpv closed the connection' })
+    })
+  })
+}
+
+/**
+ * Loads a subtitle file into a playing mpv and switches to it, so a track can
+ * be chosen without restarting the stream.
+ */
+async function addSubtitle(control, file, title = 'Orion') {
+  if (!file || !fs.existsSync(file)) return { ok: false, error: 'Subtitle file is missing' }
+  return command(control, ['sub-add', file, 'select', title])
+}
+
 module.exports = {
   findMpv,
   launch,
   readStatus,
+  command,
+  addSubtitle,
+  validateOptions,
   hdrArgs,
+  normalizeCurve,
+  TONE_CURVES,
   verify,
   scanPortable,
   normalizeCandidate,

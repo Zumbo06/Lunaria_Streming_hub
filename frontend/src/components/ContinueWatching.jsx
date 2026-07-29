@@ -4,7 +4,7 @@ import { Film, Play, X } from 'lucide-react'
 import { formatRemaining, progressApi } from '../api/orion.js'
 
 /**
- * Resume row. Entries come from real VLC playback positions, so a title only
+ * Resume row. Entries come from real player positions, so a title only
  * appears here once it has actually been started and not finished.
  */
 export default function ContinueWatching({ entries, onChanged }) {

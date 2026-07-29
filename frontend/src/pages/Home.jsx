@@ -28,7 +28,7 @@ export default function Home() {
 
   useEffect(() => {
     loadResumable()
-    // A position is committed when VLC closes, so refresh on that rather than
+    // A position is committed when the player closes, so refresh on that rather than
     // polling while something is still playing.
     return playApi.onEnded(loadResumable)
   }, [loadResumable, current?.id])

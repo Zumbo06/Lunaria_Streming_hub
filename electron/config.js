@@ -14,8 +14,13 @@ const DEFAULT_SETTINGS = {
   mpvPath: null,
   // auto applies HDR arguments only to releases that advertise HDR.
   hdrMode: 'auto',
-  // passthrough for an HDR display; a curve name tone-maps down to SDR (mpv).
-  hdrToneMap: 'passthrough',
+  // Announce HDR to the display. Independent of the curve below.
+  hdrPassthrough: true,
+  // Curve applied to whatever mapping is still needed. `clip` leaves it to the
+  // display; a named curve (bt.2446a, st2094-40, …) has mpv do the work.
+  hdrToneMap: 'clip',
+  // Extra mpv.conf lines kept inside the managed HDR block across rewrites.
+  mpvHdrOptions: '',
   networkCaching: 3000,
   vlcExtraArgs: '',
   mpvExtraArgs: '',
@@ -67,7 +72,16 @@ function readJson(file, fallback) {
 
 function getSettings() {
   const stored = readJson(settingsPath(), {})
-  return { ...DEFAULT_SETTINGS, ...stored, version: undefined }
+  const merged = { ...DEFAULT_SETTINGS, ...stored, version: undefined }
+
+  // `hdrToneMap: 'passthrough'` used to mean both "announce HDR" and "no
+  // curve". Those are separate settings now.
+  if (merged.hdrToneMap === 'passthrough') {
+    merged.hdrPassthrough = true
+    merged.hdrToneMap = 'clip'
+  }
+
+  return merged
 }
 
 function saveSettings(patch) {

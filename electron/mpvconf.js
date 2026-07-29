@@ -40,7 +40,33 @@ const HDR_CONDITION =
  * terminator any line the user appends below would be silently captured into
  * the HDR profile and only apply to HDR files.
  */
-function hdrLines({ toneMap = 'passthrough', exclusiveFullscreen = false, hardwareDecoding = true }) {
+/** Option keys the user has set themselves, so the base block can skip them. */
+function overriddenKeys(customOptions) {
+  return new Set(
+    String(customOptions || '')
+      .split(/\r?\n/)
+      .map((line) => line.trim().split('=')[0].trim())
+      .filter(Boolean),
+  )
+}
+
+function hdrLines({
+  passthrough = true,
+  toneMap: requestedCurve = 'clip',
+  exclusiveFullscreen = false,
+  hardwareDecoding = true,
+  customOptions = '',
+}) {
+  // Passthrough and the tone-mapping curve are independent: the hint tells the
+  // display what it is receiving, while the curve governs whatever mapping
+  // libplacebo still has to do because the panel cannot reach the source peak.
+  // Treating them as either/or produces a config that silently drops HDR
+  // passthrough the moment a curve is chosen.
+  const owned = overriddenKeys(customOptions)
+  const emit = (key, value) => (owned.has(key) ? [] : [`${key}=${value}`])
+  // Guards against the legacy "passthrough" setting being written as a curve.
+  const toneMap = require('./mpv').normalizeCurve(requestedCurve)
+
   const lines = [
     '# --- Applies to everything -------------------------------------------',
     '',
@@ -73,33 +99,59 @@ function hdrLines({ toneMap = 'passthrough', exclusiveFullscreen = false, hardwa
     'profile-restore=copy',
   )
 
-  if (toneMap === 'passthrough') {
+  if (passthrough) {
     lines.push(
       '',
-      '# Hand HDR to the display untouched — correct when the Windows desktop',
-      '# is already in HDR mode. mpv then requests a PQ swapchain and passes',
-      '# the source metadata through unchanged.',
-      'target-colorspace-hint=yes',
-      'd3d11-output-csp=auto',
-      '',
-      '# The display is doing the mapping, so mpv must not do it as well.',
-      'tone-mapping=clip',
+      '# Tell the display it is receiving HDR — correct when the Windows',
+      '# desktop is in HDR mode. mpv requests a PQ swapchain and passes the',
+      '# source metadata through.',
+      ...emit('target-colorspace-hint', 'yes'),
+      ...emit('d3d11-output-csp', 'auto'),
     )
   } else {
     lines.push(
       '',
-      '# Tone-map HDR down for a display that is not in HDR mode.',
-      `tone-mapping=${toneMap}`,
+      '# Display is SDR: convert rather than announcing HDR to it.',
+      ...emit('target-colorspace-hint', 'no'),
+    )
+  }
+
+  lines.push(
+    '',
+    toneMap === 'clip'
+      ? '# clip = let the display do the mapping and leave the signal alone.'
+      : `# Curve applied to whatever mapping is still needed after passthrough.`,
+    ...emit('tone-mapping', toneMap),
+  )
+
+  if (toneMap !== 'clip') {
+    lines.push(
       '',
       '# Measure real per-scene peak brightness rather than trusting the static',
       '# metadata, which is frequently wrong.',
-      'hdr-compute-peak=yes',
-      'hdr-peak-percentile=99.995',
-      'target-peak=auto',
-      'target-contrast=auto',
+      ...emit('hdr-compute-peak', 'yes'),
+      ...emit('hdr-peak-percentile', '99.995'),
+      ...emit('target-peak', 'auto'),
+      // target-contrast is the black-level control: `inf` suits OLED. Left at
+      // auto here so a user setting in the extra options wins outright.
+      ...emit('target-contrast', 'auto'),
       '',
       '# Claw back local contrast lost in the mapping.',
-      'hdr-contrast-recovery=0.30',
+      ...emit('hdr-contrast-recovery', '0.30'),
+    )
+  }
+
+  const custom = String(customOptions || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+
+  if (custom.length > 0) {
+    lines.push(
+      '',
+      '# Your own HDR options, set in Orion. These are kept verbatim across',
+      '# rewrites — edit them in Settings rather than here.',
+      ...custom,
     )
   }
 
