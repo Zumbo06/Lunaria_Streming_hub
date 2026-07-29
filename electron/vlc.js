@@ -138,6 +138,18 @@ function tokenizeArgs(input) {
   return matches.map((token) => token.replace(/^["']|["']$/g, ''))
 }
 
+/**
+ * VLC 3's HDR story is passthrough-only: there are no tone-mapping controls,
+ * and HDR reaches the panel only when the Direct3D11 output is used *and* the
+ * Windows desktop is already in HDR mode. These flags select that path and the
+ * matching hardware decoder; they do not create HDR where the display has none.
+ * mpv is the better choice when real colour management is wanted.
+ */
+function hdrArgs() {
+  if (process.platform !== 'win32') return []
+  return ['--vout=direct3d11', '--avcodec-hw=d3d11va']
+}
+
 function findFreePort(preferred) {
   return new Promise((resolve) => {
     const tester = net.createServer()
@@ -168,6 +180,7 @@ async function launch(
     startTimeSeconds = 0,
     enableControl = true,
     subtitleFile = null,
+    hdr = null,
   } = {},
 ) {
   if (!isExecutableFile(vlcPath)) {
@@ -176,6 +189,8 @@ async function launch(
   if (!streamUrl) throw new Error('No stream URL to play')
 
   const args = [streamUrl, `--network-caching=${Number(networkCaching) || 3000}`]
+
+  if (hdr?.isHdr) args.push(...hdrArgs())
 
   let control = null
   if (enableControl) {
@@ -288,6 +303,7 @@ module.exports = {
   launch,
   readStatus,
   parseStatus,
+  hdrArgs,
   isExecutableFile,
   normalizeCandidate,
   tokenizeArgs,

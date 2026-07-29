@@ -63,7 +63,8 @@ contextBridge.exposeInMainWorld('orion', {
   },
 
   play: {
-    stream: (stream, item, subtitle) => ipcRenderer.invoke('play:stream', { stream, item, subtitle }),
+    stream: (stream, item, subtitle, playerOverride) =>
+      ipcRenderer.invoke('play:stream', { stream, item, subtitle, playerOverride }),
     onStatus: (handler) => subscribe('play:status', handler),
     onProgress: (handler) => subscribe('playback:progress', handler),
     onEnded: (handler) => subscribe('playback:ended', handler),
@@ -98,6 +99,17 @@ contextBridge.exposeInMainWorld('orion', {
     stop: () => ipcRenderer.invoke('engine:stop'),
     status: () => ipcRenderer.invoke('engine:status'),
     onEvent: (handler) => subscribe('engine:event', handler),
+  },
+
+  players: {
+    detect: () => ipcRenderer.invoke('players:detect'),
+    locate: (playerId) => ipcRenderer.invoke('players:locate', playerId),
+    portable: () => ipcRenderer.invoke('players:portable'),
+    mpvConfigStatus: () => ipcRenderer.invoke('mpvconf:status'),
+    writeMpvConfig: (options) => ipcRenderer.invoke('mpvconf:write', options),
+    removeMpvConfig: () => ipcRenderer.invoke('mpvconf:remove'),
+    revealMpvConfig: () => ipcRenderer.invoke('mpvconf:reveal'),
+    preview: (stream) => ipcRenderer.invoke('players:preview', stream),
   },
 
   vlc: {

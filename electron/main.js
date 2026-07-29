@@ -10,6 +10,7 @@ const addonsLib = require('./addons')
 const streamsLib = require('./streams')
 const library = require('./library')
 const subtitlesLib = require('./subtitles')
+const players = require('./players')
 const vlc = require('./vlc')
 
 const isDev = process.env.ELECTRON_START_URL != null
@@ -308,16 +309,16 @@ function recordProgress(session, status) {
   return saved
 }
 
-function startPlaybackTracking(control, item, profileId) {
+function startPlaybackTracking(playerId, control, item, profileId) {
   stopPlaybackTracking()
   if (!control || !item?.id) return
 
-  const session = { control, item, profileId, misses: 0, last: null, timer: null }
+  const session = { playerId, control, item, profileId, misses: 0, last: null, timer: null }
 
   session.timer = setInterval(async () => {
     if (playbackSession !== session) return
 
-    const status = await vlc.readStatus(control)
+    const status = await players.readStatus(playerId, control)
 
     if (!status) {
       session.misses += 1
@@ -426,7 +427,7 @@ ipcMain.handle('app:info', async () => {
 ipcMain.handle('settings:get', () => config.getSettings())
 
 ipcMain.handle('settings:save', (event, patch) => {
-  if (patch && 'vlcPath' in patch) vlc.invalidateCache()
+  if (patch && ('vlcPath' in patch || 'mpvPath' in patch)) players.invalidateCache()
   return config.saveSettings(patch || {})
 })
 
@@ -729,13 +730,22 @@ ipcMain.handle('subtitles:get', async (event, { type, id, extra }) => {
 
 // ---- IPC: playback (SRS 4.4) ----
 
-ipcMain.handle('play:stream', async (event, { stream, item, subtitle } = {}) => {
+ipcMain.handle('play:stream', async (event, { stream, item, subtitle, playerOverride } = {}) => {
   const settings = config.getSettings()
-  const vlcPath = await vlc.findVlc(settings.vlcPath)
+  const playerId = playerOverride || players.resolveId(settings)
+  const player = players.describe(playerId)
+  const playerPath = await players.find(playerId, settings)
 
-  if (!vlcPath) {
-    return { ok: false, code: 'VLC_NOT_FOUND', error: 'VLC was not found on this system' }
+  if (!playerPath) {
+    return {
+      ok: false,
+      code: 'PLAYER_NOT_FOUND',
+      player: playerId,
+      error: `${player.name} was not found on this system`,
+    }
   }
+
+  const hdr = players.hdrDecision(stream, settings)
 
   const profileId = activeProfileId()
   const resumeAt = settings.resumePlayback === false ? 0 : resumePointFor(profileId, item)
@@ -764,26 +774,31 @@ ipcMain.handle('play:stream', async (event, { stream, item, subtitle } = {}) => 
       }
     }
 
-    broadcast('play:status', { phase: 'launching-vlc', stream: stream.filename })
-    const launched = await vlc.launch(url, {
-      vlcPath,
+    broadcast('play:status', { phase: 'launching-player', player: player.name, stream: stream.filename })
+    const launched = await players.launch(playerId, url, {
+      playerPath,
       networkCaching: settings.networkCaching,
-      extraArgs: settings.vlcExtraArgs,
+      extraArgs: playerId === 'mpv' ? settings.mpvExtraArgs : settings.vlcExtraArgs,
       startTimeSeconds: resumeAt,
       enableControl: settings.trackProgress !== false,
       subtitleFile,
+      hdr,
+      hdrToneMap: settings.hdrToneMap,
+      title: item?.name || stream.filename,
     })
 
     if (settings.trackProgress !== false && item?.id) {
-      startPlaybackTracking(launched.control, item, profileId)
+      startPlaybackTracking(playerId, launched.control, item, profileId)
     }
 
     broadcast('play:status', {
       phase: 'playing',
       stream: stream.filename,
+      player: player.name,
       url,
       resumedAt: resumeAt,
       subtitle: subtitleFile ? subtitle.language : null,
+      hdr: hdr.isHdr ? hdr.format : null,
     })
     return {
       ok: true,
@@ -792,10 +807,137 @@ ipcMain.handle('play:stream', async (event, { stream, item, subtitle } = {}) => 
       pid: launched.pid,
       resumedAt: resumeAt,
       subtitleLoaded: Boolean(subtitleFile),
+      player: player.name,
+      playerId,
+      hdr: hdr.isHdr ? hdr.format : null,
+      hdrArgs: players.hdrArgsFor(playerId, hdr, settings),
     }
   } catch (err) {
     broadcast('play:status', { phase: 'failed', stream: stream.filename, error: err.message })
     return { ok: false, code: 'PLAY_FAILED', error: err.message }
+  }
+})
+
+// ---- IPC: players ----
+
+ipcMain.handle('players:detect', async () => {
+  players.invalidateCache()
+  const settings = config.getSettings()
+  return { players: await players.detectAll(settings), selected: players.resolveId(settings) }
+})
+
+ipcMain.handle('players:locate', async (event, playerId) => {
+  const isMpv = playerId === 'mpv'
+  const filters =
+    process.platform === 'win32'
+      ? [{ name: isMpv ? 'mpv' : 'VLC', extensions: ['exe'] }]
+      : [{ name: 'All files', extensions: ['*'] }]
+
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: `Locate the ${isMpv ? 'mpv' : 'VLC'} executable`,
+    properties: process.platform === 'darwin' ? ['openFile', 'treatPackageAsDirectory'] : ['openFile'],
+    filters,
+  })
+
+  if (result.canceled || result.filePaths.length === 0) return { path: null }
+
+  // Picking mpv.com from a portable folder is corrected to mpv.exe here.
+  const chosen = isMpv
+    ? require('./mpv').normalizeCandidate(result.filePaths[0])
+    : vlc.normalizeCandidate(result.filePaths[0])
+
+  const verified = await players.verifyPath(playerId, chosen)
+  if (!verified.ok) {
+    return { path: null, error: verified.error || 'That file is not a usable player executable' }
+  }
+
+  config.saveSettings(isMpv ? { mpvPath: chosen } : { vlcPath: chosen })
+  players.invalidateCache()
+  return { path: chosen, version: verified.version || null }
+})
+
+// ---- mpv.conf in a portable folder ----
+
+const mpvconf = require('./mpvconf')
+
+async function resolvedMpvPath() {
+  const settings = config.getSettings()
+  return players.find('mpv', settings)
+}
+
+ipcMain.handle('mpvconf:status', async () => {
+  const mpvPath = await resolvedMpvPath()
+  if (!mpvPath) return { ok: false, error: 'mpv was not found' }
+
+  const settings = config.getSettings()
+  return {
+    ok: true,
+    mpvPath,
+    ...mpvconf.read(mpvPath),
+    shadow: mpvconf.shadowedUserConfig(),
+    preview: mpvconf.renderBlock({ toneMap: settings.hdrToneMap || 'passthrough' }),
+  }
+})
+
+ipcMain.handle('mpvconf:write', async (event, options) => {
+  const mpvPath = await resolvedMpvPath()
+  if (!mpvPath) return { ok: false, error: 'mpv was not found' }
+
+  const settings = config.getSettings()
+  try {
+    const result = mpvconf.write(mpvPath, {
+      toneMap: options?.toneMap || settings.hdrToneMap || 'passthrough',
+      exclusiveFullscreen: Boolean(options?.exclusiveFullscreen),
+    })
+    return { ok: true, ...result, shadow: mpvconf.shadowedUserConfig() }
+  } catch (err) {
+    return { ok: false, error: err.message }
+  }
+})
+
+ipcMain.handle('mpvconf:remove', async () => {
+  const mpvPath = await resolvedMpvPath()
+  if (!mpvPath) return { ok: false, error: 'mpv was not found' }
+
+  try {
+    return { ok: true, ...mpvconf.remove(mpvPath) }
+  } catch (err) {
+    return { ok: false, error: err.message }
+  }
+})
+
+ipcMain.handle('mpvconf:reveal', async () => {
+  const mpvPath = await resolvedMpvPath()
+  if (!mpvPath) return { ok: false }
+
+  const file = mpvconf.configPath(mpvPath)
+  if (fs.existsSync(file)) shell.showItemInFolder(file)
+  return { ok: true }
+})
+
+/** Portable mpv folders found on disk, so they can be picked without browsing. */
+ipcMain.handle('players:portable', async () => {
+  const found = players.findPortable()
+  const checked = await Promise.all(
+    found.map(async (candidate) => ({ path: candidate, ...(await players.verifyPath('mpv', candidate)) })),
+  )
+  return checked.filter((entry) => entry.ok)
+})
+
+/** Lets the UI show exactly which flags a stream would be launched with. */
+ipcMain.handle('players:preview', (event, stream) => {
+  const settings = config.getSettings()
+  const playerId = players.resolveId(settings)
+  const hdr = players.hdrDecision(stream, settings)
+
+  return {
+    playerId,
+    playerName: players.describe(playerId).name,
+    hdrSupport: players.describe(playerId).hdrSupport,
+    hdrNote: players.describe(playerId).hdrNote,
+    hdr: hdr.isHdr ? hdr.format : null,
+    reason: hdr.reason,
+    args: players.hdrArgsFor(playerId, hdr, settings),
   }
 })
 

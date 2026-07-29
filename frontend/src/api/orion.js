@@ -29,6 +29,7 @@ const api = bridge || {
   watchlist: noBridge,
   progress: noBridge,
   engine: noBridge,
+  players: noBridge,
   vlc: noBridge,
 }
 
@@ -45,6 +46,7 @@ export const profilesApi = api.profiles
 export const watchlistApi = api.watchlist
 export const progressApi = api.progress
 export const engineApi = api.engine
+export const playersApi = api.players
 export const vlcApi = api.vlc
 
 let counter = 0

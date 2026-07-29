@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
 import { AlertTriangle, CheckCircle2, Info, X } from 'lucide-react'
-import { appApi, engineApi, playApi, vlcApi } from '../api/orion.js'
+import { appApi, engineApi, playApi, playersApi } from '../api/orion.js'
 import EngineBar from './EngineBar.jsx'
 
 const PlayerContext = createContext(null)
@@ -52,14 +52,17 @@ export default function PlayerProvider({ children }) {
     [dismissToast],
   )
 
-  const locateVlc = useCallback(async () => {
-    const result = await vlcApi.locate()
-    if (result.path) {
-      pushToast({ tone: 'success', title: 'VLC set', message: result.path })
-    } else if (result.error) {
-      pushToast({ tone: 'error', title: 'Not usable', message: result.error })
-    }
-  }, [pushToast])
+  const locatePlayer = useCallback(
+    async (playerId = 'vlc') => {
+      const result = await playersApi.locate(playerId)
+      if (result.path) {
+        pushToast({ tone: 'success', title: 'Player set', message: result.path })
+      } else if (result.error) {
+        pushToast({ tone: 'error', title: 'Not usable', message: result.error })
+      }
+    },
+    [pushToast],
+  )
 
   useEffect(() => {
     const unsubscribe = engineApi.onEvent((event) => {
@@ -142,6 +145,7 @@ export default function PlayerProvider({ children }) {
 
         if (result.ok) {
           const parts = []
+          if (result.hdr) parts.push(`${result.hdr}`)
           if (result.resumedAt > 0) {
             parts.push(`resuming at ${Math.floor(result.resumedAt / 60)}m ${result.resumedAt % 60}s`)
           }
@@ -149,17 +153,17 @@ export default function PlayerProvider({ children }) {
 
           pushToast({
             tone: 'success',
-            title: 'Handed to VLC',
+            title: `Handed to ${result.player}`,
             message: parts.length > 0 ? parts.join(' · ') : stream.filename,
           })
-        } else if (result.code === 'VLC_NOT_FOUND') {
+        } else if (result.code === 'PLAYER_NOT_FOUND') {
           setEngine(IDLE_ENGINE)
           pushToast({
             tone: 'error',
-            title: 'VLC not found',
-            message: 'Orion could not locate a VLC install on this machine.',
+            title: result.error,
+            message: `Orion could not locate ${result.player === 'mpv' ? 'mpv' : 'VLC'} on this machine.`,
             duration: 0,
-            action: { label: 'Locate VLC…', run: locateVlc },
+            action: { label: 'Locate it…', run: () => locatePlayer(result.player) },
           })
         } else {
           setEngine(IDLE_ENGINE)
@@ -171,7 +175,7 @@ export default function PlayerProvider({ children }) {
         setBusyStreamId(null)
       }
     },
-    [locateVlc, pushToast],
+    [locatePlayer, pushToast],
   )
 
   const stopEngine = useCallback(async () => {
@@ -180,8 +184,8 @@ export default function PlayerProvider({ children }) {
   }, [])
 
   const value = useMemo(
-    () => ({ play, stopEngine, busyStreamId, engine, pushToast, locateVlc }),
-    [play, stopEngine, busyStreamId, engine, pushToast, locateVlc],
+    () => ({ play, stopEngine, busyStreamId, engine, pushToast, locatePlayer }),
+    [play, stopEngine, busyStreamId, engine, pushToast, locatePlayer],
   )
 
   return (

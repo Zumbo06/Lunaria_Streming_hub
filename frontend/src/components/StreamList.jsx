@@ -1,5 +1,7 @@
-import { HardDrive, Loader2, Play, Share2, Users, Zap } from 'lucide-react'
+import { HardDrive, Loader2, Play, Share2, Sparkles, Users, Zap } from 'lucide-react'
 import Badge from './Badge.jsx'
+
+const HDR_TAGS = new Set(['HDR', 'HDR10', 'HDR10+', 'DV', 'HLG'])
 
 const RESOLUTION_TONE = {
   '4K': 'accent',
@@ -84,6 +86,19 @@ function StreamRow({ stream, busy, disabled, onPlay }) {
                 {stream.seeders}
               </Badge>
             )}
+            {stream.hdrFormat && (
+              <Badge
+                tone="amber"
+                title={
+                  stream.hdrFormat === 'DV'
+                    ? 'Dolby Vision — mpv handles the dynamic metadata; VLC passes the HDR10 layer through'
+                    : `${stream.hdrFormat} — launched with HDR arguments for your chosen player`
+                }
+              >
+                <Sparkles size={10} />
+                {stream.hdrFormat}
+              </Badge>
+            )}
             {stream.multiAudio && <Badge tone="accent">MULTI</Badge>}
             {(stream.languages || []).slice(0, 4).map((language) => (
               <Badge key={language} tone="accent" title={`Audio: ${language}`}>
@@ -95,11 +110,14 @@ function StreamRow({ stream, busy, disabled, onPlay }) {
                 +{stream.languages.length - 4}
               </Badge>
             )}
-            {stream.tags.map((tag) => (
-              <Badge key={tag} tone={tag === 'CAM' ? 'red' : 'default'}>
-                {tag}
-              </Badge>
-            ))}
+            {/* HDR variants get their own badge above, so they are dropped here. */}
+            {stream.tags
+              .filter((tag) => !HDR_TAGS.has(tag))
+              .map((tag) => (
+                <Badge key={tag} tone={tag === 'CAM' ? 'red' : 'default'}>
+                  {tag}
+                </Badge>
+              ))}
             {stream.provider && <Badge tone="muted">{stream.provider}</Badge>}
             <span className="text-[11px] text-ink-500">{stream.addonName}</span>
           </div>

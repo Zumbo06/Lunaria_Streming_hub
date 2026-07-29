@@ -153,9 +153,11 @@ const TAG_PATTERNS = [
   [/web-?rip/i, 'WEBRip'],
   [/\bhdtv\b/i, 'HDTV'],
   [/\b(cam|hdcam|telesync|hdts)\b/i, 'CAM'],
-  [/\bhdr10\+/i, 'HDR10+'],
+  [/\bhdr10\+|\bhdr10plus\b/i, 'HDR10+'],
+  [/\bhlg\b/i, 'HLG'],
+  [/\bhdr10\b/i, 'HDR10'],
   [/\bhdr\b/i, 'HDR'],
-  [/\bdolby.?vision\b|\bdv\b/i, 'DV'],
+  [/\bdolby.?vision\b|\bdo?vi\b|\bdv\b/i, 'DV'],
   [/x265|h\.?265|hevc/i, 'HEVC'],
   [/\bav1\b/i, 'AV1'],
   [/10.?bit/i, '10bit'],
@@ -169,6 +171,26 @@ function parseTags(text) {
     if (pattern.test(text) && !tags.includes(label)) tags.push(label)
   }
   return tags
+}
+
+/**
+ * Identifies the high-dynamic-range format a release advertises, which decides
+ * the arguments the player is launched with. Dolby Vision is reported ahead of
+ * the HDR10 layer it is usually built on, since it needs different handling.
+ */
+function detectHdr(text) {
+  const dolbyVision = /\bdolby.?vision\b|\bdo?vi\b|\bdv\b/i.test(text)
+  const hdr10Plus = /\bhdr10\+|\bhdr10plus\b/i.test(text)
+  const hlg = /\bhlg\b/i.test(text)
+  const hdr10 = /\bhdr10\b/i.test(text)
+  const genericHdr = /\bhdr\b/i.test(text)
+
+  if (dolbyVision) return { isHdr: true, format: 'DV', hdr10Fallback: hdr10Plus || hdr10 || genericHdr }
+  if (hdr10Plus) return { isHdr: true, format: 'HDR10+', hdr10Fallback: true }
+  if (hlg) return { isHdr: true, format: 'HLG', hdr10Fallback: false }
+  if (hdr10 || genericHdr) return { isHdr: true, format: 'HDR10', hdr10Fallback: true }
+
+  return { isHdr: false, format: null, hdr10Fallback: false }
 }
 
 /** Torrentio marks Debrid-cached results as [RD+], uncached as [RD download]. */
@@ -198,6 +220,7 @@ function normalizeStream(stream, addonName) {
 
   const kind = classify(stream)
   const { sizeBytes, sizeLabel } = parseSize(stream, haystack)
+  const hdr = detectHdr(haystack)
 
   return {
     id: `${stream.infoHash || stream.url || stream.ytId || stream.externalUrl || filename}::${stream.fileIdx ?? ''}`,
@@ -213,6 +236,9 @@ function normalizeStream(stream, addonName) {
     provider: parseProvider(haystack),
     languages: parseLanguages(haystack),
     multiAudio: parseMultiAudio(haystack),
+    isHdr: hdr.isHdr,
+    hdrFormat: hdr.format,
+    hdr10Fallback: hdr.hdr10Fallback,
     tags: parseTags(haystack),
     cached: parseCached(haystack),
     url: stream.url || null,
@@ -296,6 +322,7 @@ module.exports = {
   parseTags,
   parseLanguages,
   parseMultiAudio,
+  detectHdr,
   classify,
   normalizeStream,
   groupByResolution,

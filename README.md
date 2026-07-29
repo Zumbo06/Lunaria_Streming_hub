@@ -7,7 +7,7 @@ Built to [SRs.txt](SRs.txt).
 ## Requirements
 
 - **Node.js 22+** (WebTorrent 3 requires it; the app is developed on Node 25)
-- **VLC Media Player** installed on the host
+- **A player**: VLC (default) or **mpv**, selectable in Settings. mpv is the better choice for HDR, and needs no installation — an extracted portable folder is detected automatically.
 
 ## Setup
 
@@ -50,7 +50,10 @@ npm run dist      # package with electron-builder
 | [electron/addons.js](electron/addons.js) | Addon protocol: manifest parsing, `catalog`/`meta`/`stream` URL shapes, concurrent fan-out |
 | [electron/streams.js](electron/streams.js) | Splits `url` (Debrid/HTTP) from `infoHash` (P2P); parses size, seeders, resolution, tags; builds magnets |
 | [electron/engine/server.mjs](electron/engine/server.mjs) | Forked WebTorrent process: sequential piece strategy + loopback HTTP gateway |
-| [electron/vlc.js](electron/vlc.js) | Cross-platform VLC discovery and detached launch |
+| [electron/vlc.js](electron/vlc.js) | VLC discovery, detached launch, HTTP control interface |
+| [electron/mpv.js](electron/mpv.js) | mpv discovery, HDR arguments, JSON IPC over a named pipe |
+| [electron/players.js](electron/players.js) | Routes launch/status to the selected player; HDR decisions |
+| [electron/mpvconf.js](electron/mpvconf.js) | Writes the managed HDR block into a portable build's `mpv.conf` |
 | [electron/config.js](electron/config.js) | Settings + addon list, encrypted through the OS keychain |
 | [electron/subtitles.js](electron/subtitles.js) | `subtitles` resource, language-code names, track download for VLC |
 | [electron/library.js](electron/library.js) | Profiles, watchlist and watch history in SQLite, payloads encrypted |
@@ -65,6 +68,21 @@ npm run dist      # package with electron-builder
 **Playback waits for the head *and the tail*.** Both containers keep their seek index at the end of the file — an MP4's trailing `moov` atom, a Matroska file's Cues/SeekHead — and VLC's second request is invariably a seek to the last few hundred bytes, measured identically for `.mp4` and `.mkv`. Prioritising only the head makes the player open, fail to find an index, and sit there doing nothing. The engine prebuffers both ends before handing over a URL.
 
 **A stream that is not ready is never handed to VLC.** If the opening and the index have not arrived within the buffer timeout, the engine raises an error naming what it got, how many peers it found and at what speed — instead of reporting success and letting VLC open onto a stalled stream. Poorly-seeded sources now fail loudly and early rather than looking like a broken player.
+
+**HDR is honest about what each player can do.** The release name is parsed for HDR10, HDR10+, HLG and Dolby Vision, and arguments are added only when a release actually advertises it (`auto`), always (`force`), or never (`off`).
+
+- **VLC 3 is passthrough-only.** It gets `--vout=direct3d11 --avcodec-hw=d3d11va`, which is the output path capable of handing HDR10 metadata to the display. VLC 3 has *no* tone-mapping controls, so HDR only looks right if Windows is already in HDR mode — on an SDR display it will look washed out, and the UI says so rather than pretending otherwise.
+- **mpv does it properly.** `--vo=gpu-next` (libplacebo) plus `--gpu-api=d3d11`, then either `--target-colorspace-hint=yes` to pass HDR through untouched, or `--tone-mapping=<curve> --hdr-compute-peak=yes` to map it down for an SDR display. Dolby Vision needs no extra flag — libplacebo applies the dynamic metadata itself under `gpu-next`, and mpv exposes no DV-specific option.
+
+**Portable mpv gets a real config file.** Settings can write those same HDR settings into `portable_config/mpv.conf` beside `mpv.exe`, so they apply when mpv is opened directly too, not only when Orion launches it. Only the block between the `# >>> Orion HDR settings` markers is managed — anything else in the file survives a rewrite, and a pre-existing `mpv.conf` is backed up to `.bak` before the first write. Creating `portable_config` makes mpv stop reading `%APPDATA%\mpv`; the UI warns when that folder has contents.
+
+Three things about that file were settled by testing rather than assumption, each of which silently breaks a hand-written config:
+
+- **The HDR condition keys on the transfer function.** `profile-cond=p.max_luma > 203` logs *"Property 'max-luma' was not found"* and never fires; `p.video_params.max_luma` raises no error but never fires either, even on a file reporting `max-luma=1000`. Only `p.video_params.gamma == "pq" or "hlg"` actually triggers — verified firing on a PQ file and staying off for SDR.
+- **A profile section swallows everything after it.** Any line appended below `[orion-hdr]` would apply to HDR files only. The managed block therefore closes with `[default]`, which restores always-applied semantics — confirmed by appending `speed=1.25` and seeing it take effect on both HDR and SDR.
+- **mpv decodes in software by default.** `hwdec=auto-safe` is included; it resolves to `d3d11va` here, which matters for the 4K HEVC that HDR releases invariably are.
+
+Both players are equal citizens: engine, subtitles, resume and progress tracking all work the same either way. mpv reports its position over JSON IPC on a named pipe, the counterpart to VLC's HTTP interface.
 
 **Subtitles are downloaded, not linked.** Subtitle addons return a URL per track, but VLC's `--sub-file` accepts a local path only — passing the URL silently does nothing, which is why an installed OpenSubtitles addon previously appeared to do nothing at all. The chosen track is fetched to a scratch file before launch, passed with `--sub-file` plus `--no-sub-autodetect-file` (so unrelated `.srt` files in the download folder are not picked up), and deleted on quit. A failed subtitle download never blocks the film.
 
@@ -95,7 +113,25 @@ Checked against live endpoints on Windows 11 / Node 25.2.1 / Electron 43.2.0:
 - **VLC control**: reports true duration, position advances while playing, goes silent when VLC exits, and `--start-time=75` resumes at 75 s
 - **Subtitles**: OpenSubtitles v3 returns 27 tracks for `tt0133093` and 94 for `tt0944947:1:1`; codes resolve to names (`ger → German`, `pob → Portuguese (BR)`), preferred languages sort first, and a picked track downloads to a real 99 KB `.srt` and is removed on cleanup
 - **Avatars**: local images round-trip through the encrypted payload, survive unrelated updates, clear back to the emoji on request — and the image bytes are not readable in `library.db`
-- **IPC**: all 42 invoked channels have handlers, no orphans, all 14 bridge namespaces exported
+- **HDR**: format detection correct across HDR10+/DV/HDR10/HLG/SDR names; `auto`/`force`/`off` behave; VLC emits exactly `--vout=direct3d11 --avcodec-hw=d3d11va` and **no invented tone-mapping flags**; mpv emits passthrough and tone-mapped variants correctly, with Dolby Vision handled separately
+- **mpv, against a real build** (0.41.0, libplacebo v7.365.0): every flag Orion emits is accepted (a deliberately bogus control flag is rejected); JSON IPC over the named pipe reports `state=playing len=120s`, position advances `0.5s → 4.5s`, goes null the moment mpv exits, and `--start=75` resumes at **75.5 s**
+- **Portable mpv**: an extracted build on the Desktop is found in 22 ms, `mpv.com` is corrected to `mpv.exe`, a non-mpv executable and a missing path are both rejected with a reason, and the same launch/IPC/resume suite passes against it
+- **mpv.conf**: written into `portable_config/`, then confirmed *loaded and applied* by querying the running player. Against a genuinely PQ-tagged file: `current-vo=gpu-next`, `hwdec-current=d3d11va`, `target-colorspace-hint=true`, `tone-mapping=clip`, no parse errors. Against an SDR file the HDR profile correctly does **not** fire (`target-colorspace-hint=auto`) while the global settings still apply. User lines outside the managed block survive a rewrite and stay global, the block swaps cleanly between passthrough and tone-mapping, and removal leaves the rest of the file intact
+- **Players**: VLC discovered, mpv's absence reported cleanly rather than throwing, unreachable mpv IPC resolves null
+- **Long playback**: mpv played 200 s from the gateway with **three** HTTP requests total and no retries — the response crosses window boundaries in place (`window 2: 25165872-50331695`) rather than ending. No "partial file" warning, no mpv errors, no listener-leak warnings; only 56 MB of 123 MB fetched, idling at 0 KB/s whenever the player's cache was full
+- **IPC**: all 45 invoked channels have handlers, no orphans, all 15 bridge namespaces exported
+
+### The response body must be one stream
+
+An early version served each read-ahead window with its own `pipeline(window, res, { end: false })` call. It looked equivalent and passed every short test, but broke real playback: the client saw the body finish after the first window while `Content-Length` promised the whole file. mpv logs this as
+
+```
+[curl] Transferred a partial file, retrying (#1) from 25165872
+```
+
+— `25165872` being exactly 24 MB past the requested offset, i.e. one window. The player would keep going on buffered data for a minute or two, exhaust it, retry, and eventually give up and close. Piping repeatedly into the same response also attached a fresh set of cleanup listeners per window, leaking them on a long file.
+
+The body is now a single `Readable` that advances through windows internally, so the client sees one uninterrupted response. Back-pressure still bounds the download — when the player's cache fills, the stream pauses and the swarm goes idle at 0 KB/s.
 
 ## Known issues
 

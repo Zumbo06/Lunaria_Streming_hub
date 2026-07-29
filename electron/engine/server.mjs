@@ -21,6 +21,7 @@ import http from 'node:http'
 import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
+import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import WebTorrent from 'webtorrent'
 
@@ -139,19 +140,45 @@ function parseRange(header, size) {
  * completion or client abort, so the download tracks playback instead of
  * racing to the end of the file (REQ-3.2).
  */
-async function pipeBounded(file, start, end, res) {
-  let cursor = start
+/**
+ * One continuous stream over [start, end], internally fetched a window at a
+ * time. It has to be a single source rather than one `pipeline` call per
+ * window: piping repeatedly into the same response attaches a fresh set of
+ * cleanup listeners each time (leaking them on a long file) and gives the
+ * client a chance to see the body finish early, which players report as
+ * "Transferred a partial file" and treat as end-of-stream.
+ */
+function boundedSource(file, start, end, windowBytes) {
+  async function* windows() {
+    let cursor = start
+    let index = 0
 
-  try {
-    while (cursor <= end && !res.destroyed && !res.writableEnded) {
-      const chunkEnd = Math.min(cursor + readaheadBytes - 1, end)
-      const source = file.createReadStream({ start: cursor, end: chunkEnd })
+    while (cursor <= end) {
+      const chunkEnd = Math.min(cursor + windowBytes - 1, end)
+      const inner = file.createReadStream({ start: cursor, end: chunkEnd })
+      index += 1
+      debug(`window ${index}: ${cursor}-${chunkEnd} of ${end}`)
 
-      // end:false so consecutive slices concatenate into one response body.
-      await pipeline(source, res, { end: false })
+      try {
+        for await (const piece of inner) yield piece
+      } finally {
+        // Releases this window's piece selection when the client goes away
+        // part-way through.
+        inner.destroy()
+      }
+
       cursor = chunkEnd + 1
     }
-    if (!res.destroyed && !res.writableEnded) res.end()
+
+    debug(`all windows served up to ${cursor - 1}`)
+  }
+
+  return Readable.from(windows())
+}
+
+async function pipeBounded(file, start, end, res) {
+  try {
+    await pipeline(boundedSource(file, start, end, readaheadBytes), res)
   } catch (err) {
     // Players abort mid-response on every seek; that is normal, not a fault.
     debug('response aborted:', err?.code || err?.message)

@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react'
 import {
-  Check, FolderOpen, ImagePlus, Loader2, RotateCw, Search, ShieldCheck, ShieldOff, Trash2, UserPlus,
+  Check, FileCog, FolderOpen, ImagePlus, Loader2, MonitorPlay, RotateCw, Search,
+  ShieldCheck, ShieldOff, Trash2, UserPlus,
 } from 'lucide-react'
-import { appApi, progressApi, settingsApi, vlcApi } from '../api/orion.js'
+import Badge from '../components/Badge.jsx'
+import { appApi, playersApi, progressApi, settingsApi } from '../api/orion.js'
 import { usePlayer } from '../components/PlayerProvider.jsx'
 import { useProfile } from '../components/ProfileProvider.jsx'
 import Avatar, { pickAvatarImage } from '../components/Avatar.jsx'
@@ -21,19 +23,63 @@ export default function SettingsPage() {
   const [settings, setSettings] = useState(null)
   const [info, setInfo] = useState(null)
   const [stats, setStats] = useState(null)
+  const [players, setPlayers] = useState(null)
+  const [portable, setPortable] = useState([])
+  const [mpvConf, setMpvConf] = useState(null)
   const [dirty, setDirty] = useState(false)
   const [saving, setSaving] = useState(false)
   const [detecting, setDetecting] = useState(false)
 
   useEffect(() => {
-    Promise.all([settingsApi.get(), appApi.info(), progressApi.stats()]).then(
-      ([loadedSettings, loadedInfo, loadedStats]) => {
+    Promise.all([settingsApi.get(), appApi.info(), progressApi.stats(), playersApi.detect()]).then(
+      ([loadedSettings, loadedInfo, loadedStats, detected]) => {
         setSettings(loadedSettings)
         setInfo(loadedInfo)
         setStats(loadedStats)
+        setPlayers(detected.players)
       },
     )
+    // Scanning the disk for extracted builds is slower, so it lands separately.
+    playersApi.portable().then(setPortable)
+    playersApi.mpvConfigStatus().then(setMpvConf)
   }, [current?.id])
+
+  // The preview reflects the chosen tone-mapping mode, so refresh on change.
+  useEffect(() => {
+    if (settings?.hdrToneMap) playersApi.mpvConfigStatus().then(setMpvConf)
+  }, [settings?.hdrToneMap, settings?.mpvPath])
+
+  async function writeMpvConf() {
+    const result = await playersApi.writeMpvConfig({ toneMap: settings.hdrToneMap || 'passthrough' })
+    if (result.ok) {
+      setMpvConf(await playersApi.mpvConfigStatus())
+      pushToast({
+        tone: 'success',
+        title: result.created ? 'mpv.conf created' : 'mpv.conf updated',
+        message: result.path,
+      })
+    } else {
+      pushToast({ tone: 'error', title: 'Could not write mpv.conf', message: result.error })
+    }
+  }
+
+  async function removeMpvConf() {
+    const result = await playersApi.removeMpvConfig()
+    setMpvConf(await playersApi.mpvConfigStatus())
+    pushToast(
+      result.ok
+        ? {
+            tone: 'success',
+            title: result.deletedFile ? 'mpv.conf removed' : 'HDR block removed',
+            message: result.path,
+          }
+        : { tone: 'error', title: 'Could not remove', message: result.error },
+    )
+  }
+
+  function revealMpvConf() {
+    playersApi.revealMpvConfig()
+  }
 
   function update(patch) {
     setSettings((current) => ({ ...current, ...patch }))
@@ -43,9 +89,14 @@ export default function SettingsPage() {
   async function save() {
     setSaving(true)
     const saved = await settingsApi.save({
+      player: settings.player === 'mpv' ? 'mpv' : 'vlc',
       vlcPath: settings.vlcPath || null,
+      mpvPath: settings.mpvPath || null,
+      hdrMode: settings.hdrMode || 'auto',
+      hdrToneMap: settings.hdrToneMap || 'passthrough',
       networkCaching: Number(settings.networkCaching) || 3000,
       vlcExtraArgs: settings.vlcExtraArgs || '',
+      mpvExtraArgs: settings.mpvExtraArgs || '',
       enginePort: Number(settings.enginePort) || 8080,
       downloadDir: settings.downloadDir || null,
       keepDownloads: Boolean(settings.keepDownloads),
@@ -66,27 +117,33 @@ export default function SettingsPage() {
 
   async function detect() {
     setDetecting(true)
-    const result = await vlcApi.detect()
+    const [detected, portableBuilds] = await Promise.all([playersApi.detect(), playersApi.portable()])
+    setPlayers(detected.players)
+    setPortable(portableBuilds)
     setDetecting(false)
 
-    if (result.path) {
-      setInfo((current) => ({ ...current, vlcPath: result.path }))
-      pushToast({ tone: 'success', title: 'VLC found', message: result.path })
-    } else {
-      pushToast({
-        tone: 'error',
-        title: 'VLC not found',
-        message: 'Nothing at the standard install paths. Use Browse to point at the executable.',
-      })
-    }
+    const installed = Object.values(detected.players).filter((entry) => entry.installed)
+    pushToast(
+      installed.length > 0
+        ? {
+            tone: 'success',
+            title: 'Players found',
+            message: installed.map((entry) => entry.name).join(', '),
+          }
+        : {
+            tone: 'error',
+            title: 'No player found',
+            message: 'Nothing at the standard install paths. Use Browse to point at an executable.',
+          },
+    )
   }
 
-  async function browseVlc() {
-    const result = await vlcApi.locate()
+  async function browsePlayer(playerId) {
+    const result = await playersApi.locate(playerId)
     if (result.path) {
-      setSettings((current) => ({ ...current, vlcPath: result.path }))
-      setInfo((current) => ({ ...current, vlcPath: result.path }))
-      pushToast({ tone: 'success', title: 'VLC set', message: result.path })
+      update(playerId === 'mpv' ? { mpvPath: result.path } : { vlcPath: result.path })
+      setPlayers((await playersApi.detect()).players)
+      pushToast({ tone: 'success', title: 'Player set', message: result.path })
     } else if (result.error) {
       pushToast({ tone: 'error', title: 'Not usable', message: result.error })
     }
@@ -232,33 +289,232 @@ export default function SettingsPage() {
         </button>
       </Section>
 
-      <Section title="VLC" subtitle="The external player every stream is sent to.">
-        <Field label="Executable" hint="Left blank, Orion scans the standard install locations for this platform.">
+      <Section title="Player" subtitle="Which external player streams are handed to.">
+        <div className="grid gap-2 sm:grid-cols-2">
+          {['vlc', 'mpv'].map((playerId) => {
+            const entry = players?.[playerId]
+            const selected = (settings.player || 'vlc') === playerId
+
+            return (
+              <button
+                key={playerId}
+                type="button"
+                onClick={() => update({ player: playerId })}
+                className={`focus-ring rounded-xl p-3.5 text-left ring-1 transition ${
+                  selected ? 'bg-accent/10 ring-accent/40' : 'bg-ink-850 ring-white/5 hover:bg-ink-800'
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  <MonitorPlay size={15} className={selected ? 'text-accent-soft' : 'text-ink-500'} />
+                  <span className="text-[13.5px] font-semibold text-slate-100">{entry?.name || playerId}</span>
+                  {entry?.installed ? (
+                    <Badge tone="green">INSTALLED</Badge>
+                  ) : (
+                    <Badge tone="muted">NOT FOUND</Badge>
+                  )}
+                  {entry?.hdrSupport === 'full' && <Badge tone="amber">FULL HDR</Badge>}
+                  {entry?.portable && <Badge tone="muted">PORTABLE</Badge>}
+                </div>
+                <p className="mt-1.5 text-[11.5px] leading-snug text-haze">{entry?.hdrNote}</p>
+                {entry?.version && (
+                  <p className="mt-1.5 text-[11px] text-ink-500">
+                    {entry.version}
+                    {entry.libplacebo && ` · libplacebo ${entry.libplacebo}`}
+                  </p>
+                )}
+                {entry?.path && <p className="mt-1 truncate font-mono text-[11px] text-ink-500">{entry.path}</p>}
+              </button>
+            )
+          })}
+        </div>
+
+        {players && !players[settings.player || 'vlc']?.installed && (
+          <p className="text-[11.5px] text-rose-300">
+            {(settings.player || 'vlc') === 'mpv'
+              ? 'mpv is not installed. Install it, or use Browse below to point at mpv.exe.'
+              : 'VLC is not installed. Install it, or use Browse below to point at vlc.exe.'}
+          </p>
+        )}
+
+        <Field label="VLC executable" hint="Left blank, Orion scans the standard install locations.">
           <div className="flex gap-2">
             <input
               type="text"
               value={settings.vlcPath || ''}
               onChange={(event) => update({ vlcPath: event.target.value })}
-              placeholder={info.vlcPath || 'Auto-detect'}
+              placeholder={players?.vlc?.path || 'Auto-detect'}
               spellCheck={false}
               className="focus-ring min-w-0 flex-1 rounded-lg bg-ink-850 px-3 py-2 font-mono text-[12px] text-slate-200 placeholder:text-ink-500 ring-1 ring-white/5 focus:bg-ink-800 focus:ring-accent/40"
             />
-            <IconButton onClick={browseVlc} icon={FolderOpen} label="Browse" />
-            <IconButton onClick={detect} icon={detecting ? Loader2 : Search} label="Detect" spinning={detecting} />
+            <IconButton onClick={() => browsePlayer('vlc')} icon={FolderOpen} label="Browse" />
           </div>
-          <p className="mt-2 flex items-center gap-1.5 text-[11.5px] text-haze">
-            {info.vlcPath ? (
-              <>
-                <Check size={12} className="text-emerald-400" />
-                <span className="font-mono">{info.vlcPath}</span>
-              </>
-            ) : (
-              <span className="text-rose-300">No VLC install detected on this machine.</span>
-            )}
-          </p>
         </Field>
 
-        <Field label="Network caching (ms)" hint="Passed as --network-caching. Raise it for unstable swarms.">
+        {portable.length > 0 && (
+          <Field
+            label="Portable mpv builds found"
+            hint="Extracted folders detected on this machine. Pick one to use it without installing anything."
+          >
+            <div className="space-y-1.5">
+              {portable.map((entry) => (
+                <button
+                  key={entry.path}
+                  type="button"
+                  onClick={() => update({ mpvPath: entry.path, player: 'mpv' })}
+                  className={`focus-ring flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left ring-1 transition ${
+                    settings.mpvPath === entry.path
+                      ? 'bg-accent/10 ring-accent/40'
+                      : 'bg-ink-850 ring-white/5 hover:bg-ink-800'
+                  }`}
+                >
+                  <MonitorPlay size={13} className="shrink-0 text-ink-500" />
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate font-mono text-[11px] text-slate-300">{entry.path}</span>
+                    <span className="text-[11px] text-ink-500">
+                      {entry.version}
+                      {entry.libplacebo && ` · libplacebo ${entry.libplacebo}`}
+                    </span>
+                  </span>
+                  {settings.mpvPath === entry.path && <Check size={13} className="shrink-0 text-accent-soft" />}
+                </button>
+              ))}
+            </div>
+          </Field>
+        )}
+
+        <Field label="mpv executable" hint="Left blank, Orion checks PATH, the scoop/winget/chocolatey locations, then any extracted portable folder.">
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={settings.mpvPath || ''}
+              onChange={(event) => update({ mpvPath: event.target.value })}
+              placeholder={players?.mpv?.path || 'Auto-detect'}
+              spellCheck={false}
+              className="focus-ring min-w-0 flex-1 rounded-lg bg-ink-850 px-3 py-2 font-mono text-[12px] text-slate-200 placeholder:text-ink-500 ring-1 ring-white/5 focus:bg-ink-800 focus:ring-accent/40"
+            />
+            <IconButton onClick={() => browsePlayer('mpv')} icon={FolderOpen} label="Browse" />
+            <IconButton onClick={detect} icon={detecting ? Loader2 : Search} label="Detect" spinning={detecting} />
+          </div>
+        </Field>
+      </Section>
+
+      <Section
+        title="HDR"
+        subtitle="Applied when a release advertises HDR10, HDR10+, HLG or Dolby Vision."
+      >
+        <Field
+          label="When to use HDR arguments"
+          hint="Auto reads the format out of the release name. Force is for releases that carry HDR without saying so."
+        >
+          <div className="flex gap-2">
+            {[
+              ['auto', 'Auto'],
+              ['force', 'Always'],
+              ['off', 'Never'],
+            ].map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                onClick={() => update({ hdrMode: value })}
+                className={`focus-ring rounded-lg px-3 py-1.5 text-[12px] font-medium transition ${
+                  (settings.hdrMode || 'auto') === value
+                    ? 'bg-accent/20 text-accent-soft ring-1 ring-accent/40'
+                    : 'bg-ink-850 text-haze hover:bg-ink-800 hover:text-slate-200'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </Field>
+
+        <Field
+          label="Tone mapping"
+          hint={
+            (settings.player || 'vlc') === 'mpv'
+              ? 'Passthrough sends HDR untouched to an HDR display. Pick a curve to map it down for an SDR display.'
+              : 'mpv only. VLC 3 has no tone-mapping controls — it can pass HDR through to an HDR display and nothing more.'
+          }
+        >
+          <select
+            value={settings.hdrToneMap || 'passthrough'}
+            onChange={(event) => update({ hdrToneMap: event.target.value })}
+            disabled={(settings.player || 'vlc') !== 'mpv'}
+            className="focus-ring w-56 rounded-lg bg-ink-850 px-3 py-2 text-[13px] text-slate-200 ring-1 ring-white/5 focus:bg-ink-800 focus:ring-accent/40 disabled:opacity-40"
+          >
+            <option value="passthrough">Passthrough (HDR display)</option>
+            <option value="bt.2446a">bt.2446a — ITU reference</option>
+            <option value="spline">spline — balanced</option>
+            <option value="hable">hable — filmic</option>
+            <option value="reinhard">reinhard — soft</option>
+          </select>
+        </Field>
+
+        <p className="rounded-lg bg-ink-850 px-3.5 py-2.5 text-[11.5px] leading-relaxed text-haze ring-1 ring-white/5">
+          <strong className="text-slate-300">VLC:</strong> adds{' '}
+          <code className="text-accent-soft">--vout=direct3d11 --avcodec-hw=d3d11va</code>. HDR reaches the panel only
+          if Windows itself is in HDR mode.
+          <br />
+          <strong className="text-slate-300">mpv:</strong> adds{' '}
+          <code className="text-accent-soft">--vo=gpu-next --gpu-api=d3d11</code> plus passthrough or your chosen curve.
+        </p>
+
+        {mpvConf?.ok && (
+          <Field
+            label="mpv.conf in the portable folder"
+            hint="Writes the same HDR settings into portable_config/mpv.conf, so they also apply when you open mpv directly. Only the marked block is managed — anything else you put in the file is left alone."
+          >
+            <p className="mb-2 truncate font-mono text-[11px] text-ink-500">{mpvConf.path}</p>
+
+            {mpvConf.shadow?.shadowed && (
+              <p className="mb-2 rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-[11.5px] text-amber-300">
+                Creating <code>portable_config</code> makes mpv ignore your existing config at{' '}
+                <code>{mpvConf.shadow.dir}</code> ({mpvConf.shadow.entries.join(', ')}). Copy anything you need across
+                first.
+              </p>
+            )}
+
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={writeMpvConf}
+                className="focus-ring flex items-center gap-1.5 rounded-lg bg-accent/20 px-3 py-2 text-[12px] font-medium text-accent-soft ring-1 ring-accent/30 transition hover:bg-accent/30"
+              >
+                <FileCog size={13} />
+                {mpvConf.managed ? 'Update mpv.conf' : 'Write mpv.conf'}
+              </button>
+
+              {mpvConf.exists && (
+                <>
+                  <IconButton onClick={revealMpvConf} icon={FolderOpen} label="Show file" />
+                  {mpvConf.managed && (
+                    <button
+                      type="button"
+                      onClick={removeMpvConf}
+                      className="focus-ring flex items-center gap-1.5 rounded-lg bg-ink-800 px-3 py-2 text-[12px] font-medium text-slate-200 transition hover:bg-rose-500/20 hover:text-rose-200"
+                    >
+                      <Trash2 size={13} />
+                      Remove block
+                    </button>
+                  )}
+                </>
+              )}
+            </div>
+
+            <details className="mt-2.5">
+              <summary className="cursor-pointer text-[11.5px] text-ink-500 transition hover:text-slate-300">
+                Preview what gets written
+              </summary>
+              <pre className="mt-2 max-h-64 overflow-auto rounded-lg bg-ink-950 p-3 font-mono text-[11px] leading-relaxed text-slate-300 ring-1 ring-white/5">
+                {mpvConf.preview}
+              </pre>
+            </details>
+          </Field>
+        )}
+      </Section>
+
+      <Section title="Playback tuning" subtitle="Buffering and any extra flags to pass through.">
+        <Field label="Network caching (ms)" hint="VLC --network-caching; converted to seconds for mpv --cache-secs.">
           <input
             type="number"
             min={0}
@@ -275,6 +531,17 @@ export default function SettingsPage() {
             value={settings.vlcExtraArgs || ''}
             onChange={(event) => update({ vlcExtraArgs: event.target.value })}
             placeholder="--fullscreen --no-video-title-show"
+            spellCheck={false}
+            className="focus-ring w-full rounded-lg bg-ink-850 px-3 py-2 font-mono text-[12px] text-slate-200 placeholder:text-ink-500 ring-1 ring-white/5 focus:bg-ink-800 focus:ring-accent/40"
+          />
+        </Field>
+
+        <Field label="Extra mpv arguments" hint="Appended after the URL and cache flags. Optional.">
+          <input
+            type="text"
+            value={settings.mpvExtraArgs || ''}
+            onChange={(event) => update({ mpvExtraArgs: event.target.value })}
+            placeholder="--fullscreen --profile=gpu-hq"
             spellCheck={false}
             className="focus-ring w-full rounded-lg bg-ink-850 px-3 py-2 font-mono text-[12px] text-slate-200 placeholder:text-ink-500 ring-1 ring-white/5 focus:bg-ink-800 focus:ring-accent/40"
           />

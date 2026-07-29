@@ -7,9 +7,18 @@ const path = require('path')
 // at rest through the OS keychain whenever one is reachable. Non-sensitive
 // settings stay in plain config.json so they remain hand-editable.
 const DEFAULT_SETTINGS = {
+  // VLC by default: it is the assumed dependency in the spec, and mpv is only
+  // selectable once it is actually installed.
+  player: 'vlc',
   vlcPath: null,
+  mpvPath: null,
+  // auto applies HDR arguments only to releases that advertise HDR.
+  hdrMode: 'auto',
+  // passthrough for an HDR display; a curve name tone-maps down to SDR (mpv).
+  hdrToneMap: 'passthrough',
   networkCaching: 3000,
   vlcExtraArgs: '',
+  mpvExtraArgs: '',
   enginePort: 8080,
   downloadDir: null,
   keepDownloads: false,

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { NavLink, useLocation, useNavigate, useSearchParams } from 'react-router-dom'
 import { Bookmark, Home, Maximize2, Minimize2, Puzzle, Search, Settings, Users, X } from 'lucide-react'
 import { appApi } from '../api/orion.js'
@@ -20,9 +20,28 @@ export default function TopBar() {
   const [fullscreen, setFullscreen] = useState(false)
   const { current, profiles, switchProfile } = useProfile()
 
+  const searchRef = useRef(null)
+
   useEffect(() => {
     appApi.isFullscreen().then((state) => setFullscreen(state.fullscreen))
     return appApi.onFullscreenChange(({ fullscreen: next }) => setFullscreen(next))
+  }, [])
+
+  // "/" jumps to search from anywhere, unless something is already being typed into.
+  useEffect(() => {
+    function onKeyDown(event) {
+      const tag = event.target?.tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || event.target?.isContentEditable) return
+
+      if (event.key === '/') {
+        event.preventDefault()
+        searchRef.current?.focus()
+        searchRef.current?.select()
+      }
+    }
+
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
   }, [])
 
   const onSearchPage = location.pathname === '/search'
@@ -82,10 +101,12 @@ export default function TopBar() {
         <div className="relative ml-auto w-[340px]">
           <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-ink-500" />
           <input
+            ref={searchRef}
             type="search"
             value={term}
             onChange={onChange}
-            placeholder="Search movies, series, anime…"
+            onKeyDown={(event) => event.key === 'Escape' && event.currentTarget.blur()}
+            placeholder="Search movies, series, anime…   /"
             aria-label="Search"
             className="focus-ring w-full rounded-lg bg-ink-850 py-2 pl-9 pr-8 text-[13px] text-slate-200 placeholder:text-ink-500 ring-1 ring-white/5 transition focus:bg-ink-800 focus:ring-accent/40"
           />

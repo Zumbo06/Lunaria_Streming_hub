@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import {
-  AlertTriangle, ArrowLeft, Bookmark, BookmarkCheck, Captions, Clock, Film, Loader2, Star, Tv,
+  AlertTriangle, ArrowLeft, Bookmark, BookmarkCheck, Captions, Clock, Film, Loader2, MonitorPlay, Star, Tv,
 } from 'lucide-react'
-import { formatRuntime, metaApi, nextRequestId, streamsApi, subtitlesApi, watchlistApi } from '../api/orion.js'
+import { Link } from 'react-router-dom'
+import {
+  formatRuntime, metaApi, nextRequestId, playersApi, streamsApi, subtitlesApi, watchlistApi,
+} from '../api/orion.js'
 import { usePlayer } from '../components/PlayerProvider.jsx'
 import StreamList from '../components/StreamList.jsx'
 import Badge from '../components/Badge.jsx'
@@ -165,6 +168,21 @@ export default function Detail() {
     }
     return null
   }, [subtitleId, subtitleGroups])
+
+  // ---- Player / HDR ----
+
+  const [playerInfo, setPlayerInfo] = useState(null)
+
+  useEffect(() => {
+    playersApi.detect().then((detected) => {
+      setPlayerInfo({ ...detected.players[detected.selected], selected: detected.selected })
+    })
+  }, [])
+
+  const hasHdrStream = useMemo(
+    () => groups.some((group) => group.streams.some((stream) => stream.isHdr)),
+    [groups],
+  )
 
   const subtitleCount = useMemo(
     () => subtitleGroups.reduce((total, group) => total + group.tracks.length, 0),
@@ -486,10 +504,34 @@ export default function Detail() {
           </div>
         </div>
 
-        {selectedSubtitle && (
-          <p className="mb-3 flex items-center gap-1.5 text-[11.5px] text-accent-soft">
-            <Captions size={12} />
-            {selectedSubtitle.language} subtitles will be loaded into VLC with the stream.
+        <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-1.5">
+          {playerInfo && (
+            <Link
+              to="/settings"
+              className="focus-ring flex items-center gap-1.5 rounded text-[11.5px] text-haze transition hover:text-slate-200"
+            >
+              <MonitorPlay size={12} />
+              Playing with <span className="font-medium text-slate-300">{playerInfo.name}</span>
+              {!playerInfo.installed && <span className="text-rose-300">· not installed</span>}
+            </Link>
+          )}
+
+          {selectedSubtitle && (
+            <span className="flex items-center gap-1.5 text-[11.5px] text-accent-soft">
+              <Captions size={12} />
+              {selectedSubtitle.language} subtitles
+            </span>
+          )}
+        </div>
+
+        {hasHdrStream && playerInfo?.selected === 'vlc' && (
+          <p className="mb-3 rounded-lg border border-amber-500/20 bg-amber-500/5 px-3.5 py-2.5 text-[11.5px] leading-relaxed text-amber-300">
+            Some sources here are HDR. VLC 3 can only pass HDR through to a display already in HDR mode and cannot
+            tone-map — on an SDR display these will look washed out.{' '}
+            <Link to="/settings" className="font-medium underline underline-offset-2">
+              Switch to mpv
+            </Link>{' '}
+            for full HDR handling.
           </p>
         )}
 
