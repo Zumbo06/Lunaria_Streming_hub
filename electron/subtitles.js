@@ -60,6 +60,46 @@ const LANGUAGE_NAMES = {
   ca: 'Catalan', cat: 'Catalan',
   gl: 'Galician', glg: 'Galician',
   eu: 'Basque', baq: 'Basque', eus: 'Basque',
+  fil: 'Filipino', tl: 'Filipino', tgl: 'Filipino',
+}
+
+/**
+ * Inverted view of the table above: language name -> the codes a container
+ * might have tagged a track with. Three-letter ISO 639-2 comes first because
+ * Matroska and MP4 almost always use that form; two-letter follows as a
+ * fallback for files that use ISO 639-1.
+ */
+const CODES_BY_NAME = (() => {
+  const byName = new Map()
+
+  for (const [code, name] of Object.entries(LANGUAGE_NAMES)) {
+    if (!byName.has(name)) byName.set(name, [])
+    byName.get(name).push(code)
+  }
+
+  const rank = (code) => (code.length === 3 ? 0 : code.length === 2 ? 1 : 2)
+  for (const codes of byName.values()) {
+    codes.sort((a, b) => rank(a) - rank(b) || a.localeCompare(b))
+  }
+
+  return byName
+})()
+
+/**
+ * Turns display names ("Turkish", "English") into the ordered code list players
+ * expect for `--alang` / `--audio-language`. Order is preserved, so the first
+ * language wins when a file carries several.
+ */
+function codesFor(names) {
+  const codes = []
+
+  for (const name of names || []) {
+    for (const code of CODES_BY_NAME.get(name) || []) {
+      if (!codes.includes(code)) codes.push(code)
+    }
+  }
+
+  return codes
 }
 
 const SUBTITLE_EXTENSIONS = ['.srt', '.vtt', '.ass', '.ssa', '.sub']
@@ -192,6 +232,8 @@ function cleanup() {
 
 module.exports = {
   LANGUAGE_NAMES,
+  CODES_BY_NAME,
+  codesFor,
   languageName,
   normalizeSubtitle,
   organise,

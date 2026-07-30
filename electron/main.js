@@ -821,6 +821,10 @@ ipcMain.handle('play:stream', async (event, { stream, item, subtitle, playerOver
       hdr,
       hdrToneMap: settings.hdrToneMap,
       title: item?.name || stream.filename,
+      // Selects the matching track inside a multi-audio file. Independent of
+      // which release was chosen — that decision is the user's.
+      audioLanguages: subtitlesLib.codesFor(settings.preferredAudioLanguages || []),
+      subtitleLanguages: subtitlesLib.codesFor(settings.preferredSubtitleLanguages || []),
     })
 
     if (settings.trackProgress !== false && item?.id) {

@@ -330,6 +330,8 @@ async function launch(
     hdr = null,
     hdrToneMap = 'passthrough',
     title = null,
+    audioLanguages = [],
+    subtitleLanguages = [],
   } = {},
 ) {
   if (!isExecutableFile(mpvPath)) throw new Error(`mpv executable not found at: ${mpvPath || '(unset)'}`)
@@ -342,6 +344,11 @@ async function launch(
     '--cache=yes',
     '--force-seekable=yes',
   ]
+
+  // Multi-audio releases carry several tracks; without this mpv just takes the
+  // first one, which is rarely the language the viewer wants.
+  if (audioLanguages.length > 0) args.push(`--alang=${audioLanguages.join(',')}`)
+  if (subtitleLanguages.length > 0) args.push(`--slang=${subtitleLanguages.join(',')}`)
 
   if (hdr?.isHdr) args.push(...hdrArgs({ hdrFormat: hdr.format, toneMap: hdrToneMap }))
   if (startTimeSeconds > 0) args.push(`--start=${Math.floor(startTimeSeconds)}`)

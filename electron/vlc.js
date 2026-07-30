@@ -181,6 +181,8 @@ async function launch(
     enableControl = true,
     subtitleFile = null,
     hdr = null,
+    audioLanguages = [],
+    subtitleLanguages = [],
   } = {},
 ) {
   if (!isExecutableFile(vlcPath)) {
@@ -189,6 +191,10 @@ async function launch(
   if (!streamUrl) throw new Error('No stream URL to play')
 
   const args = [streamUrl, `--network-caching=${Number(networkCaching) || 3000}`]
+
+  // Picks the matching track out of a multi-audio file rather than track one.
+  if (audioLanguages.length > 0) args.push(`--audio-language=${audioLanguages.join(',')}`)
+  if (subtitleLanguages.length > 0) args.push(`--sub-language=${subtitleLanguages.join(',')}`)
 
   if (hdr?.isHdr) args.push(...hdrArgs())
 
