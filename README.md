@@ -69,6 +69,10 @@ npm run dist      # package with electron-builder
 
 **A stream that is not ready is never handed to VLC.** If the opening and the index have not arrived within the buffer timeout, the engine raises an error naming what it got, how many peers it found and at what speed — instead of reporting success and letting VLC open onto a stalled stream. Poorly-seeded sources now fail loudly and early rather than looking like a broken player.
 
+**Discover exposes catalogs Home cannot.** Home renders shelves, which only works for catalogs that need no input. Catalogs declaring a *required* `genre` extra — Cinemeta's "New" has 107 genre options for film and 67 for series — return nothing until one is chosen, so they can never be a shelf. Discover picks one catalog at a time with its own type/catalog/genre selectors and infinite scroll, which is the only way those become reachable.
+
+**Preferred audio language ranks sources, it does not filter them.** An ordered language list is compared against what each release advertises, and a matching source outranks cached status, seeder count and size — a pristine remux in the wrong language is not the better pick. Detection is name-based, so roughly two thirds of releases carry no language tag at all; those are ranked lower but never removed. The detail panel additionally narrows to the best match, but only when a source actually offers it, with a one-click way back to everything.
+
 **HDR is honest about what each player can do.** The release name is parsed for HDR10, HDR10+, HLG and Dolby Vision, and arguments are added only when a release actually advertises it (`auto`), always (`force`), or never (`off`).
 
 - **VLC 3 is passthrough-only.** It gets `--vout=direct3d11 --avcodec-hw=d3d11va`, which is the output path capable of handing HDR10 metadata to the display. VLC 3 has *no* tone-mapping controls, so HDR only looks right if Windows is already in HDR mode — on an SDR display it will look washed out, and the UI says so rather than pretending otherwise.
@@ -111,6 +115,8 @@ Checked against live endpoints on Windows 11 / Node 25.2.1 / Electron 43.2.0:
 - **MKV behaves exactly like MP4**: a 72.4 MB Matroska served over the same Range logic decoded to **1464 KB** of frames, with VLC requesting `bytes=0-`, then the final 169 bytes for the Cues, then back to byte 123
 - **Slow/dead sources fail loudly**: an unreachable torrent raises `Timed out fetching torrent metadata — no peers responded` instead of reporting ready; a healthy one only reports ready with head and tail both buffered
 - VLC discovery resolves `C:\Program Files\VideoLAN\VLC\vlc.exe` and composes the argv from REQ-4.3
+- **Preferred audio language**: an ordered list ranks matching sources above everything else — a preferred-language source outranks a healthier swarm, the second preference follows it, and untagged sources are never dropped (only ranked lower). Confirmed live: with Turkish preferred, the single Turkish source among 57 sorts first in its resolution group
+- **Discover catalogs**: 8 Cinemeta catalogs described correctly, including the two that *require* a genre (107 and 67 options); genre filtering and genre+pagination both return results
 - **Languages**: 21 of 57 live Torrentio sources tagged, resolving flag emoji and title text (`English, Italian, Portuguese, Spanish, French, Hindi` off one 4K remux); multi-audio detected separately
 - **Library**: profiles, watchlist and continue-watching round-trip, a series collapses to its latest episode, finished titles drop off the row, profiles stay isolated — and no title, id or profile name appears anywhere in `library.db`
 - **Gateway**: valid token serves `206`; missing, wrong, truncated and old-style paths all get `403`; VLC still decodes with the filename stripped from the URL

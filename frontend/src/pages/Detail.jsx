@@ -42,6 +42,7 @@ export default function Detail() {
   const [streamErrors, setStreamErrors] = useState([])
   const [loadingStreams, setLoadingStreams] = useState(false)
   const [language, setLanguage] = useState('all')
+  const [autoLanguage, setAutoLanguage] = useState(null)
   const [saved, setSaved] = useState(false)
   const [subtitleGroups, setSubtitleGroups] = useState([])
   const [loadingSubtitles, setLoadingSubtitles] = useState(false)
@@ -128,6 +129,17 @@ export default function Detail() {
       setGroups(result.groups || [])
       setStreamErrors(result.errors || [])
       setLoadingStreams(false)
+
+      // Narrow to the preferred audio language, but only when something
+      // actually offers it — otherwise the list would look empty when most
+      // releases simply carry no language tag at all.
+      const available = new Set(
+        (result.groups || []).flatMap((group) => group.streams.flatMap((stream) => stream.languages || [])),
+      )
+      const match = (result.preferredAudio || []).find((entry) => available.has(entry))
+
+      setAutoLanguage(match || null)
+      setLanguage(match || 'all')
     })
 
     return () => {
@@ -462,7 +474,10 @@ export default function Detail() {
                 <span className="text-[11px] uppercase tracking-wider text-ink-500">Audio</span>
                 <select
                   value={language}
-                  onChange={(event) => setLanguage(event.target.value)}
+                  onChange={(event) => {
+                    setLanguage(event.target.value)
+                    setAutoLanguage(null)
+                  }}
                   className="focus-ring rounded-lg bg-ink-850 px-2.5 py-1.5 text-[12px] text-slate-200 ring-1 ring-white/5 focus:bg-ink-800 focus:ring-accent/40"
                 >
                   <option value="all">Any language</option>
@@ -535,6 +550,25 @@ export default function Detail() {
             </button>
           )}
         </div>
+
+        {autoLanguage === language && autoLanguage && (
+          <p className="mb-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11.5px] text-haze">
+            <span>
+              Filtered to <span className="font-medium text-accent-soft">{autoLanguage}</span>, your preferred audio
+              language.
+            </span>
+            <button
+              type="button"
+              onClick={() => {
+                setLanguage('all')
+                setAutoLanguage(null)
+              }}
+              className="focus-ring rounded px-1 font-medium text-slate-300 underline underline-offset-2 transition hover:text-white"
+            >
+              Show every source
+            </button>
+          </p>
+        )}
 
         {hasHdrStream && playerInfo?.selected === 'vlc' && (
           <p className="mb-3 rounded-lg border border-amber-500/20 bg-amber-500/5 px-3.5 py-2.5 text-[11.5px] leading-relaxed text-amber-300">

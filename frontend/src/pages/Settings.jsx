@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import {
   Check, FileCog, FolderOpen, ImagePlus, Loader2, MonitorPlay, RotateCw, Search,
-  ShieldCheck, ShieldOff, Trash2, UserPlus,
+  ShieldCheck, ShieldOff, Trash2, UserPlus, X,
 } from 'lucide-react'
 import Badge from '../components/Badge.jsx'
 import { appApi, playersApi, progressApi, settingsApi } from '../api/orion.js'
@@ -115,6 +115,7 @@ export default function SettingsPage() {
   // assuming VLC.
   const isMpv = (settings?.player || 'vlc') === 'mpv'
   const playerName = isMpv ? 'mpv' : 'VLC'
+  const preferredAudio = settings?.preferredAudioLanguages || []
 
   function update(patch) {
     setSettings((current) => ({ ...current, ...patch }))
@@ -138,6 +139,7 @@ export default function SettingsPage() {
       keepDownloads: Boolean(settings.keepDownloads),
       addonTimeoutMs: Number(settings.addonTimeoutMs) || 8000,
       mpvHdrOptions: settings.mpvHdrOptions || '',
+      preferredAudioLanguages: preferredAudio,
       trackProgress: settings.trackProgress !== false,
       resumePlayback: settings.resumePlayback !== false,
       headBufferBytes: Number(settings.headBufferBytes) || 4 * 1024 * 1024,
@@ -738,6 +740,59 @@ export default function SettingsPage() {
             {settings.downloadDir && (
               <IconButton onClick={() => update({ downloadDir: null })} icon={Trash2} label="Clear" />
             )}
+          </div>
+        </Field>
+      </Section>
+
+      <Section
+        title="Audio language"
+        subtitle="Sources carrying one of these rank first, and the stream list filters to the best match when a release offers it."
+      >
+        <Field
+          label="Preferred languages, in order"
+          hint="Click to add or remove. Detection reads flag emoji and language words out of the release name, so a source with no language tag at all is never excluded — it just ranks lower."
+        >
+          {preferredAudio.length > 0 ? (
+            <div className="mb-2.5 flex flex-wrap items-center gap-1.5">
+              {preferredAudio.map((entry, index) => (
+                <span
+                  key={entry}
+                  className="flex items-center gap-1.5 rounded-lg bg-accent/15 py-1 pl-2 pr-1 text-[12px] font-medium text-accent-soft ring-1 ring-accent/30"
+                >
+                  <span className="text-[10px] tabular-nums text-accent-soft/70">{index + 1}</span>
+                  {entry}
+                  <button
+                    type="button"
+                    aria-label={`Remove ${entry}`}
+                    onClick={() => update({ preferredAudioLanguages: preferredAudio.filter((x) => x !== entry) })}
+                    className="focus-ring rounded p-0.5 transition hover:text-white"
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              ))}
+            </div>
+          ) : (
+            <p className="mb-2.5 text-[11.5px] text-ink-500">
+              None set — sources are ranked by cached status, seeders and size only.
+            </p>
+          )}
+
+          <div className="max-h-40 overflow-y-auto rounded-lg bg-ink-850 p-2 ring-1 ring-white/5">
+            <div className="flex flex-wrap gap-1.5">
+              {(info.audioLanguages || [])
+                .filter((entry) => !preferredAudio.includes(entry))
+                .map((entry) => (
+                  <button
+                    key={entry}
+                    type="button"
+                    onClick={() => update({ preferredAudioLanguages: [...preferredAudio, entry] })}
+                    className="focus-ring rounded-md bg-ink-800 px-2 py-1 text-[12px] text-haze transition hover:bg-ink-700 hover:text-slate-200"
+                  >
+                    {entry}
+                  </button>
+                ))}
+            </div>
           </div>
         </Field>
       </Section>

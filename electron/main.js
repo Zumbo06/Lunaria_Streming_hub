@@ -421,6 +421,8 @@ ipcMain.handle('app:info', async () => {
     userData: config.userDataDir(),
     encryptionAvailable: config.encryptionAvailable(),
     vlcPath: await vlc.findVlc(settings.vlcPath),
+    // Single source of truth for the language pickers in Settings.
+    audioLanguages: streamsLib.SUPPORTED_LANGUAGES,
   }
 })
 
@@ -574,6 +576,38 @@ ipcMain.handle('catalog:shelves', () =>
   })),
 )
 
+/**
+ * Every catalog the installed addons expose, including the ones that need a
+ * genre picked first — those are unusable as a Home shelf but are exactly what
+ * Discover is for.
+ */
+ipcMain.handle('catalog:catalogs', () => {
+  const catalogs = []
+
+  for (const addon of enabledAddons()) {
+    if (!addonsLib.getResourceDef(addon, 'catalog')) continue
+
+    for (const catalog of addon.catalogs || []) {
+      const extras = addonsLib.catalogExtras(catalog)
+      const genre = extras.find((extra) => extra.name === 'genre')
+
+      catalogs.push({
+        uid: uidFor(addon.manifestUrl),
+        addonName: addon.name,
+        type: catalog.type,
+        catalogId: catalog.id,
+        name: catalog.name || catalog.id,
+        genres: genre?.options || [],
+        requiresGenre: Boolean(genre?.isRequired),
+        paginated: extras.some((extra) => extra.name === 'skip'),
+        key: `${uidFor(addon.manifestUrl)}::${catalog.type}::${catalog.id}`,
+      })
+    }
+  }
+
+  return catalogs
+})
+
 ipcMain.handle('catalog:load', async (event, { uid, type, catalogId, skip = 0, genre = null }) => {
   const addon = addonByUid(uid)
   if (!addon) return { ok: false, error: 'Addon is no longer installed', metas: [] }
@@ -658,7 +692,8 @@ ipcMain.handle('meta:get', async (event, { type, id }) => {
 // ---- IPC: streams (REQ-2.1 – 2.3) ----
 
 ipcMain.handle('streams:get', async (event, { type, id, requestId }) => {
-  const { addonTimeoutMs } = config.getSettings()
+  const { addonTimeoutMs, preferredAudioLanguages } = config.getSettings()
+  const preferredAudio = preferredAudioLanguages || []
   const capable = enabledAddons().filter((addon) => addonsLib.supportsResource(addon, 'stream', type, id))
 
   if (capable.length === 0) {
@@ -676,7 +711,7 @@ ipcMain.handle('streams:get', async (event, { type, id, requestId }) => {
         if (raw.length > 0 && requestId) {
           broadcast('streams:partial', {
             requestId,
-            groups: streamsLib.groupByResolution(collected.slice()),
+            groups: streamsLib.groupByResolution(collected.slice(), preferredAudio),
             total: collected.length,
           })
         }
@@ -688,10 +723,11 @@ ipcMain.handle('streams:get', async (event, { type, id, requestId }) => {
 
   return {
     ok: true,
-    groups: streamsLib.groupByResolution(collected),
+    groups: streamsLib.groupByResolution(collected, preferredAudio),
     errors,
     total: collected.length,
     addonsQueried: capable.length,
+    preferredAudio,
   }
 })
 

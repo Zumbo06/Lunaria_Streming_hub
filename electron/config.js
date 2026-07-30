@@ -31,6 +31,9 @@ const DEFAULT_SETTINGS = {
   trackProgress: true,
   resumePlayback: true,
   preferredSubtitleLanguages: ['English'],
+  // Ordered: sources carrying the first available language rank highest, and
+  // the detail panel filters to it when anything matches.
+  preferredAudioLanguages: [],
   headBufferBytes: 4 * 1024 * 1024,
   tailBufferBytes: 8 * 1024 * 1024,
   readaheadBytes: 24 * 1024 * 1024,

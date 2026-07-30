@@ -1,12 +1,15 @@
 import { useEffect, useRef, useState } from 'react'
 import { NavLink, useLocation, useNavigate, useSearchParams } from 'react-router-dom'
-import { Bookmark, Home, Maximize2, Minimize2, Puzzle, Search, Settings, Users, X } from 'lucide-react'
+import {
+  Bookmark, Compass, Home, Maximize2, Minimize2, Puzzle, Search, Settings, Users, X,
+} from 'lucide-react'
 import { appApi } from '../api/orion.js'
 import { useProfile } from './ProfileProvider.jsx'
 import Avatar from './Avatar.jsx'
 
 const NAV = [
   { to: '/', label: 'Home', icon: Home, end: true },
+  { to: '/discover', label: 'Discover', icon: Compass },
   { to: '/watchlist', label: 'Watchlist', icon: Bookmark },
   { to: '/addons', label: 'Addons', icon: Puzzle },
   { to: '/settings', label: 'Settings', icon: Settings },

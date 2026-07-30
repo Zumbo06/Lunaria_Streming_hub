@@ -132,6 +132,11 @@ function languagesFromFlags(text) {
   return found
 }
 
+/** Every language name the parser can produce, for the picker in Settings. */
+const SUPPORTED_LANGUAGES = [
+  ...new Set([...Object.values(FLAG_LANGUAGES), ...TEXT_LANGUAGES.map(([, name]) => name)]),
+].sort()
+
 function parseLanguages(text) {
   const languages = languagesFromFlags(text)
 
@@ -261,8 +266,29 @@ function dedupe(streams) {
   })
 }
 
-function compareStreams(a, b) {
-  // Instant sources first, then the healthiest swarm, then the biggest file.
+/**
+ * Position of a stream's best-matching audio language in the user's preference
+ * list. Lower is better; anything unmatched sorts last.
+ */
+function languageRank(stream, preferred) {
+  if (!preferred || preferred.length === 0) return -1
+
+  let best = Infinity
+  for (const language of stream.languages || []) {
+    const rank = preferred.indexOf(language)
+    if (rank !== -1 && rank < best) best = rank
+  }
+  return best === Infinity ? Infinity : best
+}
+
+function compareStreams(a, b, preferred) {
+  // A source in the language you actually want outranks everything else; a
+  // pristine remux in the wrong language is not the better pick.
+  const aRank = languageRank(a, preferred)
+  const bRank = languageRank(b, preferred)
+  if (aRank !== bRank) return aRank - bRank
+
+  // Instant sources next, then the healthiest swarm, then the biggest file.
   if (a.cached !== b.cached) return (b.cached === true) - (a.cached === true)
   if (a.kind !== b.kind) return (b.kind === 'direct') - (a.kind === 'direct')
   if ((b.seeders ?? -1) !== (a.seeders ?? -1)) return (b.seeders ?? -1) - (a.seeders ?? -1)
@@ -270,7 +296,7 @@ function compareStreams(a, b) {
 }
 
 /** Groups into the 4K / 1080p / 720p buckets the detail panel renders (UI 3.1). */
-function groupByResolution(streams) {
+function groupByResolution(streams, preferredLanguages = []) {
   const buckets = new Map(RESOLUTION_ORDER.map((key) => [key, []]))
 
   for (const stream of dedupe(streams)) {
@@ -280,7 +306,7 @@ function groupByResolution(streams) {
 
   return RESOLUTION_ORDER.map((resolution) => ({
     resolution,
-    streams: buckets.get(resolution).sort(compareStreams),
+    streams: buckets.get(resolution).sort((a, b) => compareStreams(a, b, preferredLanguages)),
   })).filter((group) => group.streams.length > 0)
 }
 
@@ -315,6 +341,8 @@ function directUrlFor(stream) {
 module.exports = {
   RESOLUTION_ORDER,
   DEFAULT_TRACKERS,
+  SUPPORTED_LANGUAGES,
+  languageRank,
   detectResolution,
   formatBytes,
   parseSize,

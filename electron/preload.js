@@ -41,6 +41,7 @@ contextBridge.exposeInMainWorld('orion', {
 
   catalog: {
     shelves: () => ipcRenderer.invoke('catalog:shelves'),
+    catalogs: () => ipcRenderer.invoke('catalog:catalogs'),
     load: (params) => ipcRenderer.invoke('catalog:load', params),
   },
 
