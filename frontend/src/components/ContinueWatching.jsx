@@ -80,8 +80,11 @@ function ResumeCard({ entry, onChanged }) {
             {episodeLabel && <span className="font-medium text-accent-soft">{episodeLabel}</span>}
             {remaining && <span>{remaining}</span>}
           </div>
-          <div className="mt-1.5 h-1 w-full overflow-hidden rounded-full bg-white/20">
-            <div className="h-full rounded-full bg-accent" style={{ width: `${percent}%` }} />
+          <div className="mt-2 h-[3px] w-full overflow-hidden rounded-full bg-white/25">
+            <div
+              className="h-full rounded-full bg-accent shadow-[0_0_6px_rgba(111,141,255,0.7)]"
+              style={{ width: `${Math.max(2, percent)}%` }}
+            />
           </div>
         </div>
       </div>

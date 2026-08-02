@@ -12,9 +12,14 @@ Built to [SRs.txt](SRs.txt).
 ## Setup
 
 ```bat
-setup.bat        :: installs root, frontend and electron dependencies
-run.bat          :: starts Vite + Electron in development mode
+setup.bat    :: one time — checks Node, installs everything, builds the
+             ::            interface, reports which players it found
+run.bat      :: start Orion
+dev.bat      :: start with hot reload (Vite dev server + Electron)
+dist.bat     :: package a distributable build into electron\dist
 ```
+
+`setup.bat` refuses to continue on Node older than 22 (WebTorrent 3 needs it) and warns if neither VLC nor mpv is present, since Orion decodes nothing itself. mpv is located through Orion's own discovery, so an extracted portable folder is found without being installed.
 
 Or manually:
 

@@ -1,44 +1,94 @@
 @echo off
-REM Orion - one-time dependency install
-setlocal
+REM Orion - one-time setup: dependencies, production build, player check.
+setlocal EnableDelayedExpansion
 cd /d "%~dp0"
 
-echo ============================================
-echo  Orion - installing dependencies
-echo ============================================
+echo ============================================================
+echo   Orion - setup
+echo ============================================================
 echo.
 
+REM ---- Node ----
 where node >nul 2>nul
 if errorlevel 1 (
-    echo [ERROR] Node.js not found on PATH. Install Node 22 or newer.
-    pause
-    exit /b 1
+    echo [ERROR] Node.js is not on PATH.
+    echo         Orion needs Node 22 or newer ^(WebTorrent 3 requires it^).
+    echo         https://nodejs.org
+    goto :failed
 )
 
-echo [1/3] Root tooling...
-call npm install || goto :failed
-
-echo [2/3] Frontend (React + Vite + Tailwind)...
-call npm install --prefix frontend || goto :failed
-
-echo [3/3] Electron shell + WebTorrent engine...
-call npm install --prefix electron || goto :failed
-
-echo.
-echo Done. Run run.bat to start Orion.
-echo.
-if not exist "%ProgramFiles%\VideoLAN\VLC\vlc.exe" (
-    if not exist "%ProgramFiles(x86)%\VideoLAN\VLC\vlc.exe" (
-        echo [NOTE] VLC was not found in the default install locations.
-        echo        Install VLC, or set its path in Orion's Settings screen.
-        echo.
-    )
+for /f "tokens=1 delims=." %%v in ('node -p "process.versions.node"') do set NODE_MAJOR=%%v
+for /f %%v in ('node -p "process.versions.node"') do set NODE_FULL=%%v
+if !NODE_MAJOR! LSS 22 (
+    echo [ERROR] Node !NODE_FULL! is too old. Orion needs Node 22 or newer.
+    goto :failed
 )
+echo   Node !NODE_FULL!  OK
+echo.
+
+REM ---- Dependencies ----
+echo [1/4] Root tooling ^(concurrently, wait-on, cross-env^)...
+call npm install --silent || goto :failed
+
+echo [2/4] Frontend ^(React, Vite, Tailwind^)...
+call npm install --prefix frontend --silent || goto :failed
+
+echo [3/4] Electron shell and WebTorrent engine ^(this one is large^)...
+call npm install --prefix electron --silent || goto :failed
+
+echo [4/4] Building the interface...
+call npm run build --prefix frontend --silent || goto :failed
+echo.
+
+REM ---- Players ----
+echo ------------------------------------------------------------
+echo   Players
+echo ------------------------------------------------------------
+set FOUND_PLAYER=0
+
+set "VLC_PATH="
+if exist "%ProgramFiles%\VideoLAN\VLC\vlc.exe" set "VLC_PATH=%ProgramFiles%\VideoLAN\VLC\vlc.exe"
+if exist "%ProgramFiles(x86)%\VideoLAN\VLC\vlc.exe" set "VLC_PATH=%ProgramFiles(x86)%\VideoLAN\VLC\vlc.exe"
+if defined VLC_PATH (
+    echo   VLC  found   !VLC_PATH!
+    set FOUND_PLAYER=1
+) else (
+    echo   VLC  missing  - https://www.videolan.org/vlc/
+)
+
+REM mpv is usually a portable folder rather than an install, so ask Orion's own
+REM discovery rather than guessing at paths here.
+for /f "delims=" %%m in ('node -e "try{const m=require('./electron/mpv.js');m.findMpv(null).then(p=>console.log(p||'')).catch(()=>console.log(''))}catch(e){console.log('')}" 2^>nul') do set "MPV_PATH=%%m"
+if defined MPV_PATH (
+    echo   mpv  found   !MPV_PATH!
+    set FOUND_PLAYER=1
+) else (
+    echo   mpv  missing  - optional, but the better choice for HDR
+    echo                  portable builds are detected automatically
+)
+echo.
+
+if !FOUND_PLAYER! EQU 0 (
+    echo   [WARNING] No player found. Orion decodes nothing itself, so install
+    echo             VLC or mpv before trying to play anything. You can also
+    echo             point Orion at an executable in Settings.
+    echo.
+)
+
+echo ============================================================
+echo   Setup complete.
+echo.
+echo     run.bat     start Orion
+echo     dev.bat     start with hot reload ^(for development^)
+echo     dist.bat    package a distributable build
+echo ============================================================
+echo.
 pause
 exit /b 0
 
 :failed
 echo.
-echo [ERROR] Install failed. See the output above.
+echo [ERROR] Setup failed - see the output above.
+echo.
 pause
 exit /b 1
