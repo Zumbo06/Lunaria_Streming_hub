@@ -7,6 +7,7 @@ import Badge from '../components/Badge.jsx'
 import { appApi, playersApi, progressApi, settingsApi } from '../api/orion.js'
 import { usePlayer } from '../components/PlayerProvider.jsx'
 import { useProfile } from '../components/ProfileProvider.jsx'
+import { useTheme } from '../components/ThemeProvider.jsx'
 import Avatar, { pickAvatarImage } from '../components/Avatar.jsx'
 
 export default function SettingsPage() {
@@ -116,6 +117,7 @@ export default function SettingsPage() {
   const isMpv = (settings?.player || 'vlc') === 'mpv'
   const playerName = isMpv ? 'mpv' : 'VLC'
   const preferredAudio = settings?.preferredAudioLanguages || []
+  const { theme, setTheme, themes } = useTheme()
 
   function update(patch) {
     setSettings((current) => ({ ...current, ...patch }))
@@ -210,8 +212,42 @@ export default function SettingsPage() {
     <div className="mx-auto max-w-3xl px-6 py-8 pb-28">
       <h1 className="text-lg font-semibold text-slate-100">Settings</h1>
       <p className="mt-1 text-[13px] text-haze">
-        Playback is handed to {playerName}; Orion never decodes media itself.
+        Playback is handed to {playerName}; Lunaria never decodes media itself.
       </p>
+
+      <Section title="Appearance" subtitle="Applies immediately and is remembered per install.">
+        <Field label="Theme">
+          <div className="grid gap-2 sm:grid-cols-2">
+            {themes.map((entry) => (
+              <button
+                key={entry.id}
+                type="button"
+                onClick={() => setTheme(entry.id)}
+                className={`focus-ring rounded-xl p-3.5 text-left ring-1 transition ${
+                  theme === entry.id
+                    ? 'bg-accent/10 ring-accent/40'
+                    : 'bg-ink-850 ring-white/5 hover:bg-ink-800'
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  <span className="flex gap-1">
+                    {entry.swatch.map((colour) => (
+                      <span
+                        key={colour}
+                        className="h-4 w-4 rounded-full ring-1 ring-white/20"
+                        style={{ backgroundColor: colour }}
+                      />
+                    ))}
+                  </span>
+                  <span className="text-[13.5px] font-semibold text-slate-100">{entry.name}</span>
+                  {theme === entry.id && <Check size={14} className="ml-auto text-accent-soft" />}
+                </div>
+                <p className="mt-1.5 text-[11.5px] leading-snug text-haze">{entry.description}</p>
+              </button>
+            ))}
+          </div>
+        </Field>
+      </Section>
 
       <Section title="Profiles" subtitle="Each profile keeps its own watchlist and watch history.">
         <div className="space-y-2">
@@ -381,7 +417,7 @@ export default function SettingsPage() {
           </p>
         )}
 
-        <Field label="VLC executable" hint="Left blank, Orion scans the standard install locations.">
+        <Field label="VLC executable" hint="Left blank, Lunaria scans the standard install locations.">
           <div className="flex gap-2">
             <input
               type="text"
@@ -427,7 +463,7 @@ export default function SettingsPage() {
           </Field>
         )}
 
-        <Field label="mpv executable" hint="Left blank, Orion checks PATH, the scoop/winget/chocolatey locations, then any extracted portable folder.">
+        <Field label="mpv executable" hint="Left blank, Lunaria checks PATH, the scoop/winget/chocolatey locations, then any extracted portable folder.">
           <div className="flex gap-2">
             <input
               type="text"
@@ -629,7 +665,7 @@ export default function SettingsPage() {
       </Section>
 
       <Section title="P2P engine" subtitle={`The local loopback gateway that feeds torrent bytes to ${playerName}.`}>
-        <Field label="Gateway port" hint="Orion moves to the next free port if this one is taken.">
+        <Field label="Gateway port" hint="Lunaria moves to the next free port if this one is taken.">
           <input
             type="number"
             min={1024}
@@ -667,7 +703,7 @@ export default function SettingsPage() {
 
         <Field
           label="Buffer timeout (seconds)"
-          hint={`How long to wait for the opening and the index before giving up. Orion refuses to open ${playerName} on a stream that is not ready, so a slow swarm reports an error here rather than a player that never starts.`}
+          hint={`How long to wait for the opening and the index before giving up. Lunaria refuses to open ${playerName} on a stream that is not ready, so a slow swarm reports an error here rather than a player that never starts.`}
         >
           <input
             type="number"
@@ -682,7 +718,7 @@ export default function SettingsPage() {
 
         <Field
           label="Read-ahead (MB)"
-          hint="How far ahead of the playhead the swarm may run. Orion selects only this window, so a film is streamed rather than downloaded in full."
+          hint="How far ahead of the playhead the swarm may run. Lunaria selects only this window, so a film is streamed rather than downloaded in full."
         >
           <input
             type="number"
@@ -699,7 +735,7 @@ export default function SettingsPage() {
           hint={
             settings.keepDownloads
               ? 'On: the rest of the file is fetched at low priority behind playback so what you keep is complete and playable, and it survives Stop.'
-              : 'Off: Orion streams only the sliding window and deletes everything the moment the stream stops.'
+              : 'Off: Lunaria streams only the sliding window and deletes everything the moment the stream stops.'
           }
         >
           <button
@@ -797,7 +833,7 @@ export default function SettingsPage() {
         </Field>
       </Section>
 
-      <Section title="Addons" subtitle="How long Orion waits on each addon before moving on.">
+      <Section title="Addons" subtitle="How long Lunaria waits on each addon before moving on.">
         <Field label="Request timeout (ms)">
           <input
             type="number"

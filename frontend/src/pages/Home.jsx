@@ -4,14 +4,18 @@ import { Puzzle } from 'lucide-react'
 import { addonsApi, catalogApi, playApi, progressApi } from '../api/orion.js'
 import { useProfile } from '../components/ProfileProvider.jsx'
 import ContinueWatching from '../components/ContinueWatching.jsx'
+import HeroPanel, { HeroSkeleton } from '../components/HeroPanel.jsx'
 import Shelf from '../components/Shelf.jsx'
 import { PosterSkeleton } from '../components/PosterCard.jsx'
+
+const HERO_SLIDES = 7
 
 /** Home dashboard: one shelf per catalog the installed addons expose (UI 3.1). */
 export default function Home() {
   const { current } = useProfile()
   const [shelves, setShelves] = useState(null)
   const [resumable, setResumable] = useState([])
+  const [featured, setFeatured] = useState(null)
 
   const load = useCallback(async () => {
     setShelves(await catalogApi.shelves())
@@ -25,6 +29,49 @@ export default function Home() {
     load()
     return addonsApi.onChanged(load)
   }, [load])
+
+  // The showcase is built from the same catalogs as the shelves — pulling one
+  // page from the first couple and interleaving them, so it mixes films and
+  // series rather than showing seven of the same thing. Only entries with a
+  // backdrop qualify; a poster stretched to this size looks broken.
+  useEffect(() => {
+    if (!shelves || shelves.length === 0) {
+      setFeatured([])
+      return
+    }
+
+    let cancelled = false
+
+    Promise.all(
+      shelves.slice(0, 2).map((shelf) =>
+        catalogApi
+          .load({ uid: shelf.uid, type: shelf.type, catalogId: shelf.catalogId, skip: 0 })
+          .then((result) => (result.ok ? result.metas : []))
+          .catch(() => []),
+      ),
+    ).then((pages) => {
+      if (cancelled) return
+
+      const seen = new Set()
+      const picked = []
+
+      for (let rank = 0; picked.length < HERO_SLIDES && rank < 12; rank += 1) {
+        for (const page of pages) {
+          const meta = page[rank]
+          if (!meta?.background || seen.has(meta.id)) continue
+          seen.add(meta.id)
+          picked.push(meta)
+          if (picked.length >= HERO_SLIDES) break
+        }
+      }
+
+      setFeatured(picked)
+    })
+
+    return () => {
+      cancelled = true
+    }
+  }, [shelves])
 
   useEffect(() => {
     loadResumable()
@@ -58,7 +105,7 @@ export default function Home() {
         </div>
         <h1 className="mt-5 text-lg font-semibold text-slate-100">No catalogs yet</h1>
         <p className="mt-2 text-[13px] leading-relaxed text-haze">
-          Orion shows whatever your installed addons publish. Install a metadata addon — or re-enable one you turned
+          Lunaria shows whatever your installed addons publish. Install a metadata addon — or re-enable one you turned
           off — and its shelves will appear here.
         </p>
         <Link
@@ -73,6 +120,7 @@ export default function Home() {
 
   return (
     <div className="page py-6 pb-24">
+      {featured === null ? <HeroSkeleton /> : <HeroPanel items={featured} />}
       <ContinueWatching entries={resumable} onChanged={loadResumable} />
       {shelves.map((shelf) => (
         <Shelf key={shelf.key} shelf={shelf} />

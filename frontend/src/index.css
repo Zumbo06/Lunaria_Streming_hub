@@ -2,6 +2,57 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Palette lives in variables so a theme can swap it wholesale. Values are
+   space-separated RGB channels because Tailwind composes them with an alpha:
+   rgb(var(--ink-950) / <alpha-value>). */
+:root,
+:root[data-theme='midnight'] {
+  --ink-950: 8 9 13;
+  --ink-900: 12 14 20;
+  --ink-850: 17 20 28;
+  --ink-800: 22 26 36;
+  --ink-700: 31 36 48;
+  --ink-600: 43 49 64;
+  --ink-500: 58 65 82;
+  --accent: 111 141 255;
+  --accent-soft: 142 164 255;
+  --accent-dim: 61 77 143;
+  --haze: 139 147 167;
+  --hairline: 255 255 255;
+  --hairline-opacity: 0.05;
+}
+
+/* True black for OLED panels: #000 draws no power and gives an effectively
+   infinite contrast ratio, but it also swallows the subtle greys the midnight
+   theme relies on — so separators, muted text and the accent are all lifted to
+   stay legible against it. */
+:root[data-theme='oled'] {
+  --ink-950: 0 0 0;
+  --ink-900: 0 0 0;
+  --ink-850: 10 10 12;
+  --ink-800: 20 20 24;
+  --ink-700: 38 38 44;
+  --ink-600: 58 58 66;
+  --ink-500: 108 110 122;
+  --accent: 124 154 255;
+  --accent-soft: 168 190 255;
+  --accent-dim: 60 78 150;
+  --haze: 176 182 198;
+  --hairline: 255 255 255;
+  --hairline-opacity: 0.14;
+}
+
+/* Hairlines at 5% vanish on pure black. Rather than rewrite every ring-white/5
+   in the app, the theme lifts them in place. */
+:root[data-theme='oled'] [class*='ring-white/5'] {
+  --tw-ring-color: rgb(var(--hairline) / var(--hairline-opacity));
+}
+
+:root[data-theme='oled'] [class*='border-white/5'],
+:root[data-theme='oled'] [class*='border-white/10'] {
+  border-color: rgb(var(--hairline) / var(--hairline-opacity));
+}
+
 @layer base {
   html,
   body,
@@ -23,14 +74,14 @@
   }
 
   ::-webkit-scrollbar-thumb {
-    background: #272c38;
+    background: rgb(var(--ink-600));
     border-radius: 999px;
     border: 2px solid transparent;
     background-clip: content-box;
   }
 
   ::-webkit-scrollbar-thumb:hover {
-    background: #3a4152;
+    background: rgb(var(--ink-500));
     background-clip: content-box;
   }
 }
@@ -71,7 +122,12 @@
   }
 
   .skeleton {
-    background-image: linear-gradient(90deg, #141720 0%, #1f2430 40%, #141720 80%);
+    background-image: linear-gradient(
+      90deg,
+      rgb(var(--ink-850)) 0%,
+      rgb(var(--ink-700)) 40%,
+      rgb(var(--ink-850)) 80%
+    );
     background-size: 480px 100%;
     @apply animate-shimmer rounded-lg;
   }

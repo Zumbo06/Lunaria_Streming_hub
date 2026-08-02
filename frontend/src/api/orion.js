@@ -9,7 +9,7 @@ export const isDesktop = Boolean(bridge)
 
 function required() {
   throw new Error(
-    'Orion’s desktop bridge is unavailable. Launch the app with `npm run dev` from the project root rather than opening the Vite URL in a browser.',
+    'Lunaria’s desktop bridge is unavailable. Launch the app with `npm run dev` from the project root rather than opening the Vite URL in a browser.',
   )
 }
 

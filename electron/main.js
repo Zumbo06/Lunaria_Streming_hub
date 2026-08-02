@@ -365,7 +365,7 @@ function createWindow() {
     height: 860,
     minWidth: 940,
     minHeight: 620,
-    title: 'Orion',
+    title: 'Lunaria',
     backgroundColor: '#08090d',
     autoHideMenuBar: true,
     webPreferences: {

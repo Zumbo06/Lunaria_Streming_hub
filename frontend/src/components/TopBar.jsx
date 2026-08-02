@@ -80,7 +80,7 @@ export default function TopBar() {
           onClick={() => navigate('/')}
           className="focus-ring rounded text-[15px] font-bold tracking-[0.2em] text-slate-100"
         >
-          ORION
+          LUNARIA
         </button>
 
         <nav className="flex items-center gap-1">

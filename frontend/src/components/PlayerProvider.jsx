@@ -161,7 +161,7 @@ export default function PlayerProvider({ children }) {
           pushToast({
             tone: 'error',
             title: result.error,
-            message: `Orion could not locate ${result.player === 'mpv' ? 'mpv' : 'VLC'} on this machine.`,
+            message: `Lunaria could not locate ${result.player === 'mpv' ? 'mpv' : 'VLC'} on this machine.`,
             duration: 0,
             action: { label: 'Locate it…', run: () => locatePlayer(result.player) },
           })

@@ -39,7 +39,7 @@ export default function ProfileGate() {
 
   return (
     <div className="flex h-full flex-col items-center justify-center bg-ink-950 px-6">
-      <h1 className="text-[15px] font-bold tracking-[0.2em] text-slate-300">ORION</h1>
+      <h1 className="text-[15px] font-bold tracking-[0.2em] text-slate-300">LUNARIA</h1>
       <p className="mt-6 text-2xl font-semibold text-white">Who’s watching?</p>
 
       <div className="mt-10 flex flex-wrap items-start justify-center gap-7">

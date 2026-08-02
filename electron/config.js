@@ -7,6 +7,8 @@ const path = require('path')
 // at rest through the OS keychain whenever one is reachable. Non-sensitive
 // settings stay in plain config.json so they remain hand-editable.
 const DEFAULT_SETTINGS = {
+  // 'midnight' (default blue-grey) or 'oled' (true black, lifted contrast).
+  theme: 'midnight',
   // VLC by default: it is the assumed dependency in the spec, and mpv is only
   // selectable once it is actually installed.
   player: 'vlc',

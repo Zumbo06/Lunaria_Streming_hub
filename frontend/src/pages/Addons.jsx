@@ -72,7 +72,7 @@ export default function Addons() {
         <div>
           <h1 className="text-lg font-semibold text-slate-100">Addons</h1>
           <p className="mt-1 text-[13px] text-haze">
-            Orion carries no catalog of its own — every title and stream below comes from an addon you install here.
+            Lunaria carries no catalog of its own — every title and stream below comes from an addon you install here.
           </p>
         </div>
         <button
