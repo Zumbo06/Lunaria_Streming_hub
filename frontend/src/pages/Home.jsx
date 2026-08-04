@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Puzzle } from 'lucide-react'
 import { addonsApi, catalogApi, playApi, progressApi } from '../api/orion.js'
@@ -15,6 +15,7 @@ export default function Home() {
   const { current } = useProfile()
   const [shelves, setShelves] = useState(null)
   const [resumable, setResumable] = useState([])
+  const [upNext, setUpNext] = useState([])
   const [featured, setFeatured] = useState(null)
 
   const load = useCallback(async () => {
@@ -23,7 +24,21 @@ export default function Home() {
 
   const loadResumable = useCallback(async () => {
     setResumable(await progressApi.continueWatching(20))
+
+    // Each of these costs a meta lookup to find the following episode, so they
+    // are folded in after the row has already painted rather than awaited.
+    progressApi
+      .upNext(8)
+      .then(setUpNext)
+      .catch(() => setUpNext([]))
   }, [])
+
+  // Newest activity first, whether that is a half-watched film or the episode
+  // after one finished last night.
+  const resumeRow = useMemo(
+    () => [...resumable, ...upNext].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)),
+    [resumable, upNext],
+  )
 
   useEffect(() => {
     load()
@@ -97,7 +112,7 @@ export default function Home() {
     )
   }
 
-  if (shelves.length === 0 && resumable.length === 0) {
+  if (shelves.length === 0 && resumeRow.length === 0) {
     return (
       <div className="mx-auto flex max-w-lg flex-col items-center px-6 py-24 text-center">
         <div className="rounded-2xl bg-ink-850 p-4 text-accent ring-1 ring-white/5">
@@ -121,7 +136,7 @@ export default function Home() {
   return (
     <div className="page py-6 pb-24">
       {featured === null ? <HeroSkeleton /> : <HeroPanel items={featured} />}
-      <ContinueWatching entries={resumable} onChanged={loadResumable} />
+      <ContinueWatching entries={resumeRow} onChanged={loadResumable} />
       {shelves.map((shelf) => (
         <Shelf key={shelf.key} shelf={shelf} />
       ))}

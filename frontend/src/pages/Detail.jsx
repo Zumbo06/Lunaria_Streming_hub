@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
+import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import {
-  AlertTriangle, ArrowLeft, Bookmark, BookmarkCheck, Captions, Clock, Film, Loader2, MonitorPlay, Star, Tv,
+  AlertTriangle, ArrowLeft, Bookmark, BookmarkCheck, Captions, Clock, Film, History, Loader2, MonitorPlay,
+  Star, Tv, X,
 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import {
@@ -27,9 +28,19 @@ function episodeNumberFor(seasons, selectedSeason, episodeId) {
 export default function Detail() {
   const { type, id } = useParams()
   const navigate = useNavigate()
+  const location = useLocation()
   const { play, busyStreamId, engine, applySubtitleNow } = usePlayer()
 
   const decodedId = decodeURIComponent(id)
+
+  // Set when Continue watching sends someone here: which episode they were on,
+  // which release they used, and why it could not simply be resumed.
+  const { episodeId: requestedEpisodeId, highlightSourceId, resumeFailed } = location.state || {}
+  const [resumeNotice, setResumeNotice] = useState(null)
+
+  useEffect(() => {
+    setResumeNotice(resumeFailed || null)
+  }, [resumeFailed])
 
   const [meta, setMeta] = useState(null)
   const [metaError, setMetaError] = useState(null)
@@ -96,6 +107,22 @@ export default function Detail() {
   useEffect(() => {
     if (seasons.length > 0 && selectedSeason === null) setSelectedSeason(seasons[0].season)
   }, [seasons, selectedSeason])
+
+  // Arriving from Continue watching: open on the episode that was being
+  // watched instead of the first one of season one.
+  useEffect(() => {
+    if (!requestedEpisodeId || seasons.length === 0) return
+
+    const owner = seasons.find((entry) =>
+      entry.videos.some(
+        (video) => (video.id || `${decodedId}:${video.season}:${video.episode}`) === requestedEpisodeId,
+      ),
+    )
+    if (!owner) return
+
+    setSelectedSeason(owner.season)
+    setEpisodeId(requestedEpisodeId)
+  }, [requestedEpisodeId, seasons, decodedId])
 
   // ---- Streams (REQ-2.1) ----
 
@@ -581,6 +608,25 @@ export default function Detail() {
           </p>
         )}
 
+        {resumeNotice && (
+          <div className="mb-4 flex items-start gap-2.5 rounded-lg border border-amber-500/20 bg-amber-500/5 px-4 py-3 text-[12.5px] leading-relaxed text-amber-200">
+            <History size={15} className="mt-0.5 shrink-0" />
+            <div className="min-w-0 flex-1">
+              <p className="font-medium">The source you watched this with is no longer usable.</p>
+              <p className="mt-0.5 text-amber-300/80">{resumeNotice}</p>
+              <p className="mt-1 text-amber-300/80">Pick another source below to carry on where you left off.</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setResumeNotice(null)}
+              aria-label="Dismiss"
+              className="focus-ring shrink-0 rounded p-0.5 transition hover:text-amber-100"
+            >
+              <X size={14} />
+            </button>
+          </div>
+        )}
+
         {streamErrors.length > 0 && (
           <div className="mb-4 flex flex-col gap-1 rounded-lg border border-amber-500/20 bg-amber-500/5 px-4 py-3 text-[12px] text-amber-300">
             {streamErrors.map((entry) => (
@@ -617,6 +663,7 @@ export default function Detail() {
           <StreamList
             groups={visibleGroups}
             busyStreamId={busyStreamId}
+            highlightStreamId={highlightSourceId}
             onPlay={(stream) => play(stream, playItem, selectedSubtitle)}
           />
         )}

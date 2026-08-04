@@ -66,10 +66,14 @@ contextBridge.exposeInMainWorld('orion', {
   play: {
     stream: (stream, item, subtitle, playerOverride) =>
       ipcRenderer.invoke('play:stream', { stream, item, subtitle, playerOverride }),
+    next: (item, previousSource, previousSubtitle) =>
+      ipcRenderer.invoke('play:next', { item, previousSource, previousSubtitle }),
     onStatus: (handler) => subscribe('play:status', handler),
     addSubtitle: (subtitle) => ipcRenderer.invoke('play:addSubtitle', subtitle),
     onProgress: (handler) => subscribe('playback:progress', handler),
     onEnded: (handler) => subscribe('playback:ended', handler),
+    onAutoAdvance: (handler) => subscribe('play:autoAdvance', handler),
+    cancelAutoAdvance: () => ipcRenderer.invoke('play:cancelAutoAdvance'),
   },
 
   profiles: {
@@ -91,6 +95,7 @@ contextBridge.exposeInMainWorld('orion', {
 
   progress: {
     continueWatching: (limit) => ipcRenderer.invoke('progress:continue', limit),
+    upNext: (limit) => ipcRenderer.invoke('progress:upNext', limit),
     get: (type, videoId) => ipcRenderer.invoke('progress:get', { type, videoId }),
     clear: (type, videoId) => ipcRenderer.invoke('progress:clear', { type, videoId }),
     clearAll: () => ipcRenderer.invoke('progress:clearAll'),

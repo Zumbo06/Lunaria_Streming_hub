@@ -32,6 +32,11 @@ const DEFAULT_SETTINGS = {
   addonTimeoutMs: 8000,
   trackProgress: true,
   resumePlayback: true,
+  // What clicking a Continue watching card does: 'play' starts the release that
+  // was watched last time, 'highlight' opens the title with it marked.
+  resumeAction: 'play',
+  // Start the next episode when one finishes, after a cancellable countdown.
+  autoPlayNext: true,
   preferredSubtitleLanguages: ['English'],
   // Ordered: sources carrying the first available language rank highest, and
   // the detail panel filters to it when anything matches.

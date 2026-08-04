@@ -1,4 +1,5 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { AlertTriangle, CheckCircle2, Info, X } from 'lucide-react'
 import { appApi, engineApi, playApi, playersApi } from '../api/orion.js'
 import EngineBar from './EngineBar.jsx'
@@ -32,9 +33,11 @@ let toastId = 0
  * torrent keeps reporting while the user browses elsewhere.
  */
 export default function PlayerProvider({ children }) {
+  const navigate = useNavigate()
   const [toasts, setToasts] = useState([])
   const [busyStreamId, setBusyStreamId] = useState(null)
   const [engine, setEngine] = useState(IDLE_ENGINE)
+  const autoAdvanceToast = useRef(null)
 
   const dismissToast = useCallback((id) => {
     setToasts((current) => current.filter((toast) => toast.id !== id))
@@ -178,6 +181,115 @@ export default function PlayerProvider({ children }) {
     [locatePlayer, pushToast],
   )
 
+  const openEntryDetails = useCallback(
+    (entry, state) => {
+      navigate(`/title/${encodeURIComponent(entry.type)}/${encodeURIComponent(entry.id)}`, {
+        state: { episodeId: entry.videoId || null, ...state },
+      })
+    },
+    [navigate],
+  )
+
+  /**
+   * Continues a Continue watching card. A resumable entry replays the release
+   * it was watched with; an "up next" card has no release yet, so the main
+   * process picks one matching the previous episode. Anything that fails lands
+   * on the title page with the reason rather than at a dead end.
+   */
+  const resumeEntry = useCallback(
+    async (entry) => {
+      const item = {
+        type: entry.type,
+        id: entry.id,
+        videoId: entry.videoId || entry.id,
+        name: entry.name,
+        poster: entry.poster || null,
+        season: entry.season ?? null,
+        episode: entry.episode ?? null,
+      }
+
+      if (entry.upNext) {
+        setBusyStreamId(`next:${item.videoId}`)
+        try {
+          const result = await playApi.next(item, entry.previousSource || null, entry.previousSubtitle || null)
+
+          if (result.ok) {
+            pushToast({
+              tone: 'success',
+              title: `Handed to ${result.player}`,
+              message: `S${item.season}:E${item.episode}${entry.episodeTitle ? ` · ${entry.episodeTitle}` : ''}`,
+            })
+          } else {
+            pushToast({ tone: 'error', title: 'Could not start the next episode', message: result.error })
+            openEntryDetails(entry, { resumeFailed: result.error })
+          }
+          return result
+        } finally {
+          setBusyStreamId(null)
+        }
+      }
+
+      // Nothing was recorded about how this was watched — the only honest
+      // thing to do is let the source be picked again.
+      if (!entry.source) {
+        openEntryDetails(entry)
+        return null
+      }
+
+      const result = await play(entry.source, item, entry.subtitle || null)
+
+      // `play` has already explained a missing player, and that is not the
+      // source's fault — only a broken source sends you to the title page.
+      if (!result?.ok && result?.code !== 'PLAYER_NOT_FOUND') {
+        openEntryDetails(entry, {
+          resumeFailed: result?.error || 'That source could not be started',
+          highlightSourceId: entry.source.id,
+        })
+      }
+      return result
+    },
+    [openEntryDetails, play, pushToast],
+  )
+
+  // Auto-advance announcements. The scheduled toast is the only thing standing
+  // between a finished episode and the next one starting, so it never expires
+  // on its own — it is replaced or dismissed by the next announcement.
+  useEffect(() => {
+    const unsubscribe = playApi.onAutoAdvance((event) => {
+      if (autoAdvanceToast.current) {
+        dismissToast(autoAdvanceToast.current)
+        autoAdvanceToast.current = null
+      }
+
+      const label = event.next ? `S${event.next.season}:E${event.next.episode}` : 'the next episode'
+
+      switch (event.phase) {
+        case 'scheduled':
+          autoAdvanceToast.current = pushToast({
+            tone: 'info',
+            title: `Up next · ${label}`,
+            message: [event.next?.episodeTitle, event.stream?.filename].filter(Boolean).join(' — '),
+            countdownTo: Date.now() + (event.startsInMs || 0),
+            duration: 0,
+            action: { label: 'Cancel', run: () => playApi.cancelAutoAdvance() },
+          })
+          break
+        case 'cancelled':
+          if (event.reason === 'user') {
+            pushToast({ tone: 'info', title: 'Stopped', message: `${label} will not start automatically` })
+          }
+          break
+        case 'unavailable':
+        case 'failed':
+          pushToast({ tone: 'error', title: `Could not start ${label}`, message: event.error })
+          break
+        default:
+          break
+      }
+    })
+    return unsubscribe
+  }, [dismissToast, pushToast])
+
   /** Pushes a subtitle into the running player without restarting the stream. */
   const applySubtitleNow = useCallback(
     async (subtitle) => {
@@ -198,8 +310,28 @@ export default function PlayerProvider({ children }) {
   }, [])
 
   const value = useMemo(
-    () => ({ play, stopEngine, busyStreamId, engine, pushToast, locatePlayer, applySubtitleNow }),
-    [play, stopEngine, busyStreamId, engine, pushToast, locatePlayer, applySubtitleNow],
+    () => ({
+      play,
+      resumeEntry,
+      openEntryDetails,
+      stopEngine,
+      busyStreamId,
+      engine,
+      pushToast,
+      locatePlayer,
+      applySubtitleNow,
+    }),
+    [
+      play,
+      resumeEntry,
+      openEntryDetails,
+      stopEngine,
+      busyStreamId,
+      engine,
+      pushToast,
+      locatePlayer,
+      applySubtitleNow,
+    ],
   )
 
   return (
@@ -215,6 +347,24 @@ const TOAST_TONES = {
   success: { icon: CheckCircle2, ring: 'ring-emerald-500/30', accent: 'text-emerald-300' },
   error: { icon: AlertTriangle, ring: 'ring-rose-500/30', accent: 'text-rose-300' },
   info: { icon: Info, ring: 'ring-accent/30', accent: 'text-accent-soft' },
+}
+
+/** Seconds left before an auto-advance fires, so the cancel window is visible. */
+function Countdown({ endsAt }) {
+  const [now, setNow] = useState(Date.now())
+
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 500)
+    return () => clearInterval(timer)
+  }, [])
+
+  const seconds = Math.max(0, Math.ceil((endsAt - now) / 1000))
+
+  return (
+    <p className="mt-1 text-[12px] font-medium text-accent-soft">
+      {seconds > 0 ? `Starting in ${seconds}s` : 'Starting…'}
+    </p>
+  )
 }
 
 function ToastStack({ toasts, onDismiss }) {
@@ -238,6 +388,7 @@ function ToastStack({ toasts, onDismiss }) {
                 {toast.message && (
                   <p className="mt-0.5 break-words text-[12px] leading-snug text-haze">{toast.message}</p>
                 )}
+                {toast.countdownTo && <Countdown endsAt={toast.countdownTo} />}
                 {toast.action && (
                   <button
                     type="button"

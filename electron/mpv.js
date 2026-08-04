@@ -15,6 +15,12 @@ const net = require('net')
 const os = require('os')
 const path = require('path')
 
+// How far ahead of the play position mpv may buffer, and how much it keeps
+// behind for a quick seek back. Sized for a 4K remux (~60-80 Mbps), where
+// mpv's 150 MiB default is only a few seconds of video.
+const FORWARD_CACHE = '512MiB'
+const BACK_CACHE = '128MiB'
+
 let cachedPath = null
 
 function isExecutableFile(candidate) {
@@ -322,7 +328,6 @@ async function launch(
   streamUrl,
   {
     mpvPath,
-    networkCaching = 3000,
     extraArgs = '',
     startTimeSeconds = 0,
     enableControl = true,
@@ -339,9 +344,20 @@ async function launch(
 
   const args = [
     streamUrl,
-    // mpv takes its network buffer in seconds, not milliseconds.
-    `--cache-secs=${Math.max(1, Math.round(Number(networkCaching) / 1000) || 3)}`,
     '--cache=yes',
+    // `--cache-secs` is deliberately not set from `networkCaching`. That
+    // setting is VLC's jitter buffer in milliseconds; mpv's cache-secs is a
+    // *prefetch cap* whose own default is 3600000 (verified with
+    // `mpv --list-options`), because mpv bounds the cache by bytes instead.
+    // Converting 3000 ms into `--cache-secs=3` told mpv to hold three seconds
+    // of video — under a second of a 4K remux — which is why playback survives
+    // the opening and then stalls the first time the swarm dips.
+    //
+    // mpv's default byte cap of 150 MiB is roughly a minute of 1080p but only
+    // seconds of 4K, so it is raised here. The stream stays bounded; it just
+    // holds enough to ride out a slow patch.
+    `--demuxer-max-bytes=${FORWARD_CACHE}`,
+    `--demuxer-max-back-bytes=${BACK_CACHE}`,
     '--force-seekable=yes',
   ]
 

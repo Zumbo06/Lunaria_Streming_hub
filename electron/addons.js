@@ -281,6 +281,55 @@ async function fetchSubtitles(addon, type, id, extra, timeoutMs) {
   return Array.isArray(data?.subtitles) ? data.subtitles : []
 }
 
+// ---- Episode ordering ----
+
+/** An episode an addon has announced but not yet aired is not playable. */
+function isReleased(video) {
+  const when = video.released || video.firstAired
+  if (!when) return true
+
+  const at = Date.parse(when)
+  return Number.isNaN(at) || at <= Date.now()
+}
+
+/**
+ * Puts a series meta's `videos` into broadcast order. Addons are free to return
+ * them in any order and some omit `id`, so both are normalised here rather than
+ * at each call site — the fallback id is the same `series:season:episode` shape
+ * the detail page builds.
+ */
+function orderedVideos(meta) {
+  const videos = Array.isArray(meta?.videos) ? meta.videos : []
+
+  return videos
+    .filter((video) => video && (video.id || (video.season != null && video.episode != null)))
+    .map((video) => ({
+      ...video,
+      id: video.id || `${meta.id}:${video.season}:${video.episode}`,
+      season: Number(video.season ?? 0),
+      episode: Number(video.episode ?? 0),
+    }))
+    // Specials sit in season 0 and therefore sort ahead of the first season,
+    // which is where the detail page places them too.
+    .sort((a, b) => a.season - b.season || a.episode - b.episode)
+}
+
+/**
+ * The episode that follows `currentVideoId` — the next one in the same season,
+ * or the first of the season after it. Returns null at the end of the series,
+ * when every later episode is still unaired, or when the current episode is not
+ * part of this meta at all.
+ */
+function nextVideo(meta, currentVideoId) {
+  if (!currentVideoId) return null
+
+  const ordered = orderedVideos(meta)
+  const at = ordered.findIndex((video) => video.id === currentVideoId)
+  if (at === -1) return null
+
+  return ordered.slice(at + 1).find(isReleased) || null
+}
+
 /**
  * Runs `task` against every addon at once and resolves with one entry per
  * addon, successes and failures alike. A single dead scraper must never hold
@@ -317,6 +366,8 @@ module.exports = {
   fetchMeta,
   fetchStreams,
   fetchSubtitles,
+  orderedVideos,
+  nextVideo,
   fanOut,
   clearCache,
 }

@@ -330,6 +330,40 @@ function buildMagnet(stream) {
   return `magnet:?${params.join('&')}`
 }
 
+/**
+ * The subset of a stream worth keeping so the same release can be played again
+ * later. Everything `buildMagnet` and `directUrlFor` read, plus what is needed
+ * to name the release in the UI and re-apply the HDR decision. Seeders, tags
+ * and the addon's free-text detail are dropped: they are stale by the time
+ * anyone resumes.
+ */
+function snapshot(stream) {
+  if (!stream) return null
+
+  return {
+    id: stream.id,
+    kind: stream.kind,
+    addonName: stream.addonName || null,
+    label: stream.label || '',
+    filename: stream.filename || '',
+    resolution: stream.resolution || null,
+    sizeLabel: stream.sizeLabel || null,
+    languages: Array.isArray(stream.languages) ? stream.languages : [],
+    isHdr: Boolean(stream.isHdr),
+    hdrFormat: stream.hdrFormat || null,
+    hdr10Fallback: Boolean(stream.hdr10Fallback),
+    url: stream.url || null,
+    infoHash: stream.infoHash || null,
+    fileIdx: Number.isInteger(stream.fileIdx) ? stream.fileIdx : null,
+    // Trackers are the only part that can grow unbounded; a swarm needs a
+    // handful, not hundreds.
+    sources: Array.isArray(stream.sources) ? stream.sources.slice(0, 40) : [],
+    ytId: stream.ytId || null,
+    externalUrl: stream.externalUrl || null,
+    bingeGroup: stream.bingeGroup || null,
+  }
+}
+
 /** Resolves the URL handed to VLC for non-P2P streams (REQ-4.1). */
 function directUrlFor(stream) {
   if (stream.kind === 'direct') return stream.url
@@ -355,5 +389,6 @@ module.exports = {
   normalizeStream,
   groupByResolution,
   buildMagnet,
+  snapshot,
   directUrlFor,
 }

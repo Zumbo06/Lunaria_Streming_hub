@@ -144,6 +144,8 @@ export default function SettingsPage() {
       preferredAudioLanguages: preferredAudio,
       trackProgress: settings.trackProgress !== false,
       resumePlayback: settings.resumePlayback !== false,
+      resumeAction: settings.resumeAction === 'highlight' ? 'highlight' : 'play',
+      autoPlayNext: settings.autoPlayNext !== false,
       headBufferBytes: Number(settings.headBufferBytes) || 4 * 1024 * 1024,
       tailBufferBytes: Number(settings.tailBufferBytes) || 8 * 1024 * 1024,
       readaheadBytes: Number(settings.readaheadBytes) || 24 * 1024 * 1024,
@@ -355,6 +357,25 @@ export default function SettingsPage() {
           hint={`Starts ${playerName} at the saved position (${isMpv ? '--start' : '--start-time'}) when you replay something you already began.`}
           checked={settings.resumePlayback !== false}
           onChange={() => update({ resumePlayback: settings.resumePlayback === false })}
+        />
+        <Field
+          label="Clicking a Continue watching card"
+          hint="The release you watched with is remembered alongside the position. Entries from before that was recorded always open the title page."
+        >
+          <select
+            value={settings.resumeAction || 'play'}
+            onChange={(event) => update({ resumeAction: event.target.value })}
+            className="focus-ring w-72 rounded-lg bg-ink-850 px-3 py-2 text-[13px] text-slate-200 ring-1 ring-white/5 focus:bg-ink-800 focus:ring-accent/40"
+          >
+            <option value="play">Play it straight away</option>
+            <option value="highlight">Open the title with that source highlighted</option>
+          </select>
+        </Field>
+        <Toggle
+          label="Play the next episode automatically"
+          hint="When an episode finishes, the following one is queued from a matching release and starts after a ten-second countdown you can cancel."
+          checked={settings.autoPlayNext !== false}
+          onChange={() => update({ autoPlayNext: settings.autoPlayNext === false })}
         />
         <button
           type="button"
@@ -630,7 +651,10 @@ export default function SettingsPage() {
       </Section>
 
       <Section title="Playback tuning" subtitle="Buffering and any extra flags to pass through.">
-        <Field label="Network caching (ms)" hint="VLC --network-caching; converted to seconds for mpv --cache-secs.">
+        <Field
+          label="Network caching (ms)"
+          hint="VLC --network-caching. mpv is not tuned from this — it buffers by size (512 MiB ahead), which is what a 4K stream needs."
+        >
           <input
             type="number"
             min={0}

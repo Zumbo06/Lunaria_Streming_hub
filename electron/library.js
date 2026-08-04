@@ -278,6 +278,10 @@ const STARTED_AT = 0.01
  * Upserts the position for one video. `videoId` is the episode id for series
  * and the item id for films; `id` always stays the catalogue root so the two
  * can be grouped on the Continue watching row.
+ *
+ * `source` and `subtitle` record *how* it was watched so the same release can
+ * be resumed without asking every addon again. Both ride inside the encrypted
+ * payload — a release name is as revealing as a title.
  */
 function saveProgress(profileId, entry) {
   const {
@@ -288,6 +292,8 @@ function saveProgress(profileId, entry) {
     poster,
     season = null,
     episode = null,
+    source = null,
+    subtitle = null,
     positionSeconds = 0,
     durationSeconds = 0,
   } = entry
@@ -311,7 +317,17 @@ function saveProgress(profileId, entry) {
     profileId,
     keyFor(type, resolvedVideoId),
     keyFor(type, id),
-    seal({ type, id, videoId: resolvedVideoId, name: name || '', poster: poster || null, season, episode }),
+    seal({
+      type,
+      id,
+      videoId: resolvedVideoId,
+      name: name || '',
+      poster: poster || null,
+      season,
+      episode,
+      source,
+      subtitle,
+    }),
     positionSeconds,
     durationSeconds,
     percent,
@@ -374,6 +390,43 @@ function getContinueWatching(profileId, limit = 20) {
     .filter((entry) => entry.id)
 }
 
+/**
+ * The most recently *finished* episode of each series, which is what "up next"
+ * is derived from — the episode itself is done, so it no longer belongs on the
+ * Continue watching row, but the show may well have another one waiting.
+ *
+ * Films are excluded: finishing one is the end of it.
+ */
+function getFinishedSeries(profileId, limit = 8) {
+  const rows = db
+    .prepare(
+      `SELECT p.payload, p.duration_seconds, p.updated_at
+         FROM progress p
+         JOIN (
+           SELECT series_key, MAX(updated_at) AS newest
+             FROM progress
+            WHERE profile_id = ? AND finished = 1
+            GROUP BY series_key
+         ) latest
+           ON p.series_key = latest.series_key AND p.updated_at = latest.newest
+        WHERE p.profile_id = ? AND p.finished = 1
+        ORDER BY p.updated_at DESC
+        LIMIT ?`,
+    )
+    .all(profileId, profileId, limit * 3)
+
+  return rows
+    .map((row) => ({
+      ...(unseal(row.payload) || {}),
+      durationSeconds: row.duration_seconds,
+      updatedAt: row.updated_at,
+    }))
+    // `type` only survives inside the payload, so the series filter has to
+    // happen here rather than in the query.
+    .filter((entry) => entry.id && entry.type === 'series')
+    .slice(0, limit)
+}
+
 function clearProgress(profileId, type, videoId) {
   db.prepare('DELETE FROM progress WHERE profile_id = ? AND video_key = ?').run(profileId, keyFor(type, videoId))
   return true
@@ -415,6 +468,7 @@ module.exports = {
   saveProgress,
   getProgress,
   getContinueWatching,
+  getFinishedSeries,
   clearProgress,
   clearAllProgress,
   stats,

@@ -1,4 +1,5 @@
-import { HardDrive, Loader2, Play, Share2, Sparkles, Users, Zap } from 'lucide-react'
+import { useEffect, useRef } from 'react'
+import { HardDrive, History, Loader2, Play, Share2, Sparkles, Users, Zap } from 'lucide-react'
 import Badge from './Badge.jsx'
 
 const HDR_TAGS = new Set(['HDR', 'HDR10', 'HDR10+', 'DV', 'HLG'])
@@ -15,7 +16,7 @@ const RESOLUTION_TONE = {
  * Stream links grouped by resolution, each row carrying the size, seeder count
  * and quality tags parsed out of the addon payload (REQ-2.3, UI 3.1).
  */
-export default function StreamList({ groups, busyStreamId, onPlay }) {
+export default function StreamList({ groups, busyStreamId, highlightStreamId, onPlay }) {
   return (
     <div className="space-y-6">
       {groups.map((group) => (
@@ -36,6 +37,7 @@ export default function StreamList({ groups, busyStreamId, onPlay }) {
                 stream={stream}
                 busy={busyStreamId === stream.id}
                 disabled={Boolean(busyStreamId) && busyStreamId !== stream.id}
+                highlighted={Boolean(highlightStreamId) && highlightStreamId === stream.id}
                 onPlay={onPlay}
               />
             ))}
@@ -46,17 +48,26 @@ export default function StreamList({ groups, busyStreamId, onPlay }) {
   )
 }
 
-function StreamRow({ stream, busy, disabled, onPlay }) {
+function StreamRow({ stream, busy, disabled, highlighted, onPlay }) {
   const isDirect = stream.kind !== 'p2p'
   const KindIcon = isDirect ? Zap : Share2
+  const row = useRef(null)
+
+  // The whole point of marking the previous release is not having to hunt for
+  // it, so bring it into view rather than only colouring it.
+  useEffect(() => {
+    if (highlighted) row.current?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  }, [highlighted])
 
   return (
-    <li>
+    <li ref={row}>
       <button
         type="button"
         disabled={busy || disabled}
         onClick={() => onPlay(stream)}
-        className="focus-ring group flex w-full items-center gap-3 rounded-lg bg-ink-850 px-3.5 py-3 text-left ring-1 ring-white/5 transition enabled:hover:bg-ink-800 enabled:hover:ring-accent/30 disabled:opacity-50"
+        className={`focus-ring group flex w-full items-center gap-3 rounded-lg px-3.5 py-3 text-left ring-1 transition enabled:hover:bg-ink-800 enabled:hover:ring-accent/30 disabled:opacity-50 ${
+          highlighted ? 'bg-accent/10 ring-accent/50' : 'bg-ink-850 ring-white/5'
+        }`}
       >
         <span
           className={`shrink-0 rounded-md p-1.5 ${
@@ -73,6 +84,12 @@ function StreamRow({ stream, busy, disabled, onPlay }) {
           </p>
 
           <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+            {highlighted && (
+              <Badge tone="accent" title="This is the release you watched this with last time">
+                <History size={10} />
+                WATCHED LAST TIME
+              </Badge>
+            )}
             {stream.cached === true && <Badge tone="green">CACHED</Badge>}
             {stream.sizeLabel && (
               <Badge tone="muted">

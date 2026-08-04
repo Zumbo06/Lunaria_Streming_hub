@@ -85,8 +85,12 @@ export default function HeroPanel({ items = [] }) {
             decoding="async"
             className="h-full w-full object-cover object-top"
           />
-          <div className="absolute inset-0 bg-gradient-to-r from-ink-950 via-ink-950/80 to-transparent" />
-          <div className="absolute inset-0 bg-gradient-to-t from-ink-950 via-transparent to-transparent" />
+          {/* Scrims are bounded rather than full-coverage: the left one clears
+              well before the right edge and the bottom one only covers the
+              text. Legibility comes from the drop shadows below, so the
+              artwork itself is left alone. */}
+          <div className="absolute inset-0 bg-gradient-to-r from-ink-950 via-ink-950/45 via-40% to-transparent to-72%" />
+          <div className="absolute inset-x-0 bottom-0 h-2/5 bg-gradient-to-t from-ink-950/85 to-transparent" />
         </div>
       ))}
 
@@ -104,7 +108,7 @@ export default function HeroPanel({ items = [] }) {
           </h2>
         )}
 
-        <div className="mb-2.5 flex flex-wrap items-center gap-2 text-[12px] text-slate-300">
+        <div className="mb-2.5 flex flex-wrap items-center gap-2 text-[12px] text-slate-300 drop-shadow">
           {item.imdbRating && (
             <span className="flex items-center gap-1 font-medium text-amber-300">
               <Star size={11} className="fill-amber-300" />

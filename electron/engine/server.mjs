@@ -360,34 +360,54 @@ function prebuffer(torrent, file, headBytes, tailBytes) {
   return { head: [first, headEnd], tail: hasTail ? [tailStart, last] : null }
 }
 
+/** How many of a window's pieces are actually verified on disk. */
+function windowStatus(torrent, window) {
+  if (!window) return { present: 0, total: 0 }
+
+  let present = 0
+  for (let index = window[0]; index <= window[1]; index += 1) {
+    if (torrent.bitfield.get(index)) present += 1
+  }
+  return { present, total: window[1] - window[0] + 1 }
+}
+
 /**
  * Resolves only once the opening and the container index are both on disk.
  * Reports live counts while it waits, so a starving swarm is visible in the UI
  * rather than looking like the app has hung.
+ *
+ * The head is measured in *pieces of the head window*, not in `file.downloaded`.
+ * That property sums every piece of the file, so the tail — which is selected
+ * and fetched at the same time — counts towards it. On a 4K release, where one
+ * piece is commonly 16-32 MB, a single arriving tail piece exceeds the 4 MB head
+ * target on its own and playback was reported ready with nothing at all at the
+ * start of the file, which is what the player then failed to open.
  */
 function waitForPrebuffer(torrent, file, windows, headBytes, timeoutMs) {
-  const headTarget = Math.min(headBytes, file.length)
+  const head = windows?.head || null
   const tail = windows?.tail || null
+  const pieceLength = torrent.pieceLength || 0
 
   return new Promise((resolve) => {
-    const deadline = Date.now() + timeoutMs
+    let stallDeadline = Date.now() + timeoutMs
+    let bestSeen = -1
     let lastEmit = 0
 
     const poll = () => {
-      let tailPresent = 0
-      let tailTotal = 0
-      if (tail) {
-        tailTotal = tail[1] - tail[0] + 1
-        for (let index = tail[0]; index <= tail[1]; index += 1) {
-          if (torrent.bitfield.get(index)) tailPresent += 1
-        }
-      }
+      const headState = windowStatus(torrent, head)
+      const tailState = windowStatus(torrent, tail)
+      const downloaded = file.downloaded
 
+      // Byte figures are what the settings and the UI speak in; whole pieces
+      // are what actually has to arrive.
       const status = {
-        headDone: Math.min(file.downloaded, headTarget),
-        headTarget,
-        tailPresent,
-        tailTotal,
+        headDone: head ? Math.min(headState.present * pieceLength, file.length) : Math.min(downloaded, headBytes),
+        headTarget: head ? Math.min(headState.total * pieceLength, file.length) : Math.min(headBytes, file.length),
+        headPieces: headState.present,
+        headPieceTotal: headState.total,
+        tailPresent: tailState.present,
+        tailTotal: tailState.total,
+        pieceLength,
         numPeers: torrent.numPeers,
         downloadSpeed: torrent.downloadSpeed,
       }
@@ -398,10 +418,21 @@ function waitForPrebuffer(torrent, file, windows, headBytes, timeoutMs) {
         send({ type: 'buffering', infoHash: torrent.infoHash, ...status })
       }
 
-      if (file.downloaded >= headTarget && tailPresent === tailTotal) {
+      const headReady = head ? headState.present === headState.total : downloaded >= Math.min(headBytes, file.length)
+      if (headReady && tailState.present === tailState.total) {
         return resolve({ ok: true, ...status })
       }
-      if (now > deadline) return resolve({ ok: false, ...status })
+
+      // A 32 MB piece legitimately takes far longer than the nominal timeout to
+      // land, so the deadline tracks *stalling* rather than elapsed time: any
+      // byte arriving pushes it out. A dead swarm still fails after one full
+      // timeout because nothing ever arrives.
+      if (downloaded > bestSeen) {
+        bestSeen = downloaded
+        stallDeadline = now + timeoutMs
+      }
+
+      if (now > stallDeadline) return resolve({ ok: false, ...status })
       setTimeout(poll, 250)
     }
 
@@ -540,6 +571,13 @@ async function start(payload) {
 
   activeFile = file
 
+  // A read window smaller than one piece cannot reduce what gets fetched — it
+  // only splits the same piece across several reads. 4K releases routinely use
+  // 16-32 MB pieces, above the default 24 MB window.
+  if (torrent.pieceLength) {
+    readaheadBytes = Math.max(requestedReadahead, torrent.pieceLength * 2)
+  }
+
   if (keepFiles) {
     // Keeping a file only makes sense if it ends up complete, so the rest of it
     // is queued at low priority. Serving reads sit at priority 1 and still win,
@@ -576,13 +614,15 @@ async function start(payload) {
     // failure is surfaced instead of being handed to the player.
     const headMb = (status.headDone / (1024 * 1024)).toFixed(1)
     const targetMb = (status.headTarget / (1024 * 1024)).toFixed(1)
+    const pieceMb = (status.pieceLength / (1024 * 1024)).toFixed(0)
     const speedKb = Math.round(status.downloadSpeed / 1024)
     await stop()
     throw new Error(
-      `Not enough of this torrent arrived to start playback: ${headMb}/${targetMb} MB of the opening and ` +
-        `${status.tailPresent}/${status.tailTotal} tail pieces after ${Math.round(bufferTimeoutMs / 1000)}s ` +
-        `(${status.numPeers} peers, ${speedKb} KB/s). Pick a source with more seeders, or raise the ` +
-        `buffer timeout in Settings.`,
+      `This torrent stopped delivering before playback could start: ${headMb}/${targetMb} MB of the opening ` +
+        `(${status.headPieces}/${status.headPieceTotal} pieces) and ${status.tailPresent}/${status.tailTotal} ` +
+        `tail pieces, with nothing new for ${Math.round(bufferTimeoutMs / 1000)}s ` +
+        `(${status.numPeers} peers, ${speedKb} KB/s, ${pieceMb} MB pieces). Pick a source with more seeders, ` +
+        `or raise the buffer timeout in Settings.`,
     )
   }
 

@@ -118,10 +118,29 @@ function settleStart(result, error) {
   else resolve(result)
 }
 
+/**
+ * Pushes the guard back while the engine is visibly working. A 4K release with
+ * 32 MB pieces can take several minutes to buffer honestly, and this timer
+ * firing mid-buffer would abandon a stream that was never actually stuck — and
+ * mask the engine's own, far more specific report.
+ */
+function refreshStartGuard() {
+  if (!pendingStart) return
+  clearTimeout(pendingStart.timer)
+  pendingStart.timer = setTimeout(() => {
+    settleStart(null, new Error('Engine stopped responding while preparing the stream'))
+  }, pendingStart.guardMs)
+}
+
 function onEngineMessage(message) {
   if (!message || typeof message !== 'object') return
 
   switch (message.type) {
+    case 'buffering':
+    case 'progress':
+    case 'metadata':
+      refreshStartGuard()
+      break
     case 'ready':
       engineState = {
         running: true,
@@ -217,14 +236,15 @@ function engineStart(stream, settings) {
     settleStart(null, new Error('Superseded by a newer stream request'))
 
     // Must outlast the engine's own metadata + buffer deadlines, otherwise this
-    // fires first and masks the engine's far more specific error.
+    // fires first and masks the engine's far more specific error. It is reset
+    // by every engine event, so it only fires on genuine silence.
     const guardMs = 60000 + (Number(settings.bufferTimeoutMs) || 120000) + 30000
 
     const timer = setTimeout(() => {
-      settleStart(null, new Error('Engine timed out preparing the stream'))
+      settleStart(null, new Error('Engine stopped responding while preparing the stream'))
     }, guardMs)
 
-    pendingStart = { resolve, reject, timer }
+    pendingStart = { resolve, reject, timer, guardMs }
 
     engine.send({
       cmd: 'start',
@@ -328,6 +348,13 @@ function startPlaybackTracking(playerId, control, item, profileId) {
       stopPlaybackTracking()
       broadcast('playback:ended', { item: session.item, last: session.last })
       engineStop()
+
+      // Only reached once the player is closed, so the engine has already been
+      // told to stop; the countdown gives it far longer than it needs to
+      // unwind before a new torrent starts.
+      scheduleAutoAdvance(session.item, session.last).catch((err) => {
+        console.error('[main] Auto-advance failed:', err.message)
+      })
       return
     }
 
@@ -673,7 +700,8 @@ ipcMain.handle('search:query', async (event, { query, requestId }) => {
   return { ok: true, metas: collected, errors }
 })
 
-ipcMain.handle('meta:get', async (event, { type, id }) => {
+/** First addon that answers with metadata for an item wins. */
+async function metaFor(type, id) {
   const { addonTimeoutMs } = config.getSettings()
   const capable = enabledAddons().filter((addon) => addonsLib.supportsResource(addon, 'meta', type, id))
 
@@ -687,17 +715,19 @@ ipcMain.handle('meta:get', async (event, { type, id }) => {
     return { ok: false, error: firstError?.error || 'No addon returned metadata for this item', meta: null }
   }
   return { ok: true, meta: hit.value }
-})
+}
+
+ipcMain.handle('meta:get', (event, { type, id }) => metaFor(type, id))
 
 // ---- IPC: streams (REQ-2.1 – 2.3) ----
 
-ipcMain.handle('streams:get', async (event, { type, id, requestId }) => {
+async function collectStreams(type, id, requestId = null) {
   const { addonTimeoutMs, preferredAudioLanguages } = config.getSettings()
   const preferredAudio = preferredAudioLanguages || []
   const capable = enabledAddons().filter((addon) => addonsLib.supportsResource(addon, 'stream', type, id))
 
   if (capable.length === 0) {
-    return { ok: true, groups: [], errors: [], total: 0, addonsQueried: 0 }
+    return { ok: true, groups: [], errors: [], total: 0, addonsQueried: 0, preferredAudio }
   }
 
   const collected = []
@@ -729,11 +759,13 @@ ipcMain.handle('streams:get', async (event, { type, id, requestId }) => {
     addonsQueried: capable.length,
     preferredAudio,
   }
-})
+}
+
+ipcMain.handle('streams:get', (event, { type, id, requestId }) => collectStreams(type, id, requestId))
 
 // ---- IPC: subtitles ----
 
-ipcMain.handle('subtitles:get', async (event, { type, id, extra }) => {
+async function collectSubtitles(type, id, extra) {
   const { addonTimeoutMs, preferredSubtitleLanguages } = config.getSettings()
   const capable = enabledAddons().filter((addon) => addonsLib.supportsResource(addon, 'subtitles', type, id))
 
@@ -762,11 +794,23 @@ ipcMain.handle('subtitles:get', async (event, { type, id, extra }) => {
     total: collected.length,
     addonsQueried: capable.length,
   }
-})
+}
+
+ipcMain.handle('subtitles:get', (event, { type, id, extra }) => collectSubtitles(type, id, extra || {}))
 
 // ---- IPC: playback (SRS 4.4) ----
 
-ipcMain.handle('play:stream', async (event, { stream, item, subtitle, playerOverride } = {}) => {
+/**
+ * Everything between "a stream was chosen" and "a player is running it":
+ * engine start or URL resolution, subtitle download, launch, progress
+ * tracking. Shared by the play IPC and by auto-advance so the two can never
+ * drift apart.
+ */
+async function startPlayback({ stream, item, subtitle, playerOverride } = {}) {
+  // Choosing something to watch overrules a queued next episode, which would
+  // otherwise take the player over part-way through.
+  cancelAutoAdvance('superseded')
+
   const settings = config.getSettings()
   const playerId = playerOverride || players.resolveId(settings)
   const player = players.describe(playerId)
@@ -828,7 +872,14 @@ ipcMain.handle('play:stream', async (event, { stream, item, subtitle, playerOver
     })
 
     if (settings.trackProgress !== false && item?.id) {
-      startPlaybackTracking(playerId, launched.control, item, profileId)
+      // The release and subtitle ride along with the item so every progress
+      // write records *how* this was watched, not only how far in.
+      startPlaybackTracking(
+        playerId,
+        launched.control,
+        { ...item, source: streamsLib.snapshot(stream), subtitle: subtitle || null },
+        profileId,
+      )
     }
 
     broadcast('play:status', {
@@ -856,6 +907,160 @@ ipcMain.handle('play:stream', async (event, { stream, item, subtitle, playerOver
     broadcast('play:status', { phase: 'failed', stream: stream.filename, error: err.message })
     return { ok: false, code: 'PLAY_FAILED', error: err.message }
   }
+}
+
+ipcMain.handle('play:stream', (event, request = {}) => startPlayback(request))
+
+// ---- Auto-advance (next episode) ----
+//
+// Starting a torrent and a player without anyone asking is intrusive, so
+// nothing launches straight away: the next episode is resolved, announced, and
+// only played once a countdown the renderer can cancel has run out.
+
+const AUTO_ADVANCE_DELAY_MS = 10000
+
+let autoAdvance = null
+
+function announceAutoAdvance(phase, detail) {
+  broadcast('play:autoAdvance', { phase, ...detail })
+}
+
+function cancelAutoAdvance(reason = 'cancelled') {
+  if (!autoAdvance) return false
+
+  clearTimeout(autoAdvance.timer)
+  const { next } = autoAdvance
+  autoAdvance = null
+  announceAutoAdvance('cancelled', { next, reason })
+  return true
+}
+
+/**
+ * The episode after the one that just finished, resolved through the same meta
+ * the detail page uses. Null for films, for the last episode of a series, and
+ * whenever no addon can describe the series any more.
+ */
+async function nextEpisodeFor(item) {
+  if (!item?.id || item.type !== 'series') return null
+
+  const { meta } = await metaFor(item.type, item.id)
+  const video = meta ? addonsLib.nextVideo(meta, item.videoId || item.id) : null
+  if (!video) return null
+
+  return {
+    type: item.type,
+    id: item.id,
+    videoId: video.id,
+    name: meta.name || item.name || '',
+    poster: meta.poster || item.poster || null,
+    season: video.season,
+    episode: video.episode,
+    episodeTitle: video.title || video.name || '',
+  }
+}
+
+/**
+ * Picks the release for a follow-on episode. `bingeGroup` is the protocol's own
+ * answer to this and is honoured first; after that the same addon at the same
+ * resolution is nearly always the same release group, which is what continuing
+ * a series should feel like. Otherwise the top of the ranked list.
+ */
+function pickFollowOnStream(groups, previous) {
+  const all = groups.flatMap((group) => group.streams)
+  if (all.length === 0) return null
+
+  if (previous) {
+    if (previous.bingeGroup) {
+      const binge = all.find((stream) => stream.bingeGroup === previous.bingeGroup)
+      if (binge) return binge
+    }
+
+    const sameRelease = all.find(
+      (stream) => stream.addonName === previous.addonName && stream.resolution === previous.resolution,
+    )
+    if (sameRelease) return sameRelease
+  }
+
+  return all[0]
+}
+
+/**
+ * An external subtitle is tied to the file it was fetched for, so the previous
+ * episode's cannot be reused — but the *language* choice should carry over.
+ */
+async function followOnSubtitle(previous, next) {
+  if (!previous?.lang) return null
+
+  try {
+    const { groups } = await collectSubtitles(next.type, next.videoId, {})
+    const tracks = groups.flatMap((group) => group.tracks)
+    return tracks.find((track) => track.lang === previous.lang) || null
+  } catch {
+    return null
+  }
+}
+
+async function scheduleAutoAdvance(item, last) {
+  if (config.getSettings().autoPlayNext === false) return
+  if (!last?.finished) return
+
+  cancelAutoAdvance('superseded')
+
+  const next = await nextEpisodeFor(item)
+  if (!next) return
+
+  const { groups } = await collectStreams(next.type, next.videoId)
+  const stream = pickFollowOnStream(groups, item.source)
+
+  if (!stream) {
+    announceAutoAdvance('unavailable', { next, error: 'No addon offered a stream for the next episode' })
+    return
+  }
+
+  const subtitle = await followOnSubtitle(item.subtitle, next)
+
+  autoAdvance = {
+    next,
+    timer: setTimeout(async () => {
+      autoAdvance = null
+      announceAutoAdvance('starting', { next })
+
+      const result = await startPlayback({ stream, item: next, subtitle })
+      if (!result.ok) announceAutoAdvance('failed', { next, error: result.error })
+    }, AUTO_ADVANCE_DELAY_MS),
+  }
+
+  announceAutoAdvance('scheduled', {
+    next,
+    startsInMs: AUTO_ADVANCE_DELAY_MS,
+    subtitle: subtitle ? subtitle.language : null,
+    stream: {
+      filename: stream.filename,
+      addonName: stream.addonName,
+      resolution: stream.resolution,
+    },
+  })
+}
+
+ipcMain.handle('play:cancelAutoAdvance', () => ({ cancelled: cancelAutoAdvance('user') }))
+
+/**
+ * Plays an episode nobody has picked a release for yet — an "up next" card.
+ * The release is chosen the same way auto-advance chooses one, so continuing a
+ * series by hand and by timer land on the same file.
+ */
+ipcMain.handle('play:next', async (event, { item, previousSource, previousSubtitle } = {}) => {
+  if (!item?.videoId) return { ok: false, code: 'NO_ITEM', error: 'No episode to play' }
+
+  const { groups } = await collectStreams(item.type, item.videoId)
+  const stream = pickFollowOnStream(groups, previousSource)
+
+  if (!stream) {
+    return { ok: false, code: 'NO_STREAM', error: 'No addon offered a stream for this episode' }
+  }
+
+  const subtitle = await followOnSubtitle(previousSubtitle, item)
+  return startPlayback({ stream, item, subtitle })
 })
 
 // ---- IPC: players ----
@@ -1059,6 +1264,45 @@ ipcMain.handle('watchlist:remove', (event, { type, id }) =>
 ipcMain.handle('watchlist:has', (event, { type, id }) => library.inWatchlist(activeProfileId(), type, id))
 
 ipcMain.handle('progress:continue', (event, limit) => library.getContinueWatching(activeProfileId(), limit || 20))
+
+/**
+ * Series whose latest episode is finished but which have another one waiting.
+ * Kept separate from `progress:continue` because it needs a meta request per
+ * series — Home renders the resumable row first and folds these in after.
+ */
+ipcMain.handle('progress:upNext', async (event, limit) => {
+  const profileId = activeProfileId()
+  if (!profileId) return []
+
+  const resuming = new Set(library.getContinueWatching(profileId, 50).map((entry) => `${entry.type}:${entry.id}`))
+  const finished = library.getFinishedSeries(profileId, limit || 8)
+
+  const resolved = await Promise.all(
+    finished
+      .filter((entry) => !resuming.has(`${entry.type}:${entry.id}`))
+      .map(async (entry) => {
+        try {
+          const next = await nextEpisodeFor(entry)
+          if (!next) return null
+
+          // Deliberately *not* `source`: that release is the previous episode's
+          // file and would play the wrong thing. It travels as a hint for
+          // matching the same release group when this card is played.
+          return {
+            ...next,
+            previousSource: entry.source || null,
+            previousSubtitle: entry.subtitle || null,
+            upNext: true,
+            updatedAt: entry.updatedAt,
+          }
+        } catch {
+          return null
+        }
+      }),
+  )
+
+  return resolved.filter(Boolean)
+})
 
 ipcMain.handle('progress:get', (event, { type, videoId }) =>
   library.getProgress(activeProfileId(), type, videoId),
