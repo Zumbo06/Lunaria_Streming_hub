@@ -1,50 +1,17 @@
 {
   "name": "orion-electron",
   "version": "1.0.0",
-  "description": "Electron shell for Orion",
+  "description": "Electron shell for Lunaria",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "dev": "cross-env ELECTRON_START_URL=http://localhost:5173 electron .",
-    "build": "electron-builder"
+    "dev": "cross-env ELECTRON_START_URL=http://localhost:5173 electron ."
   },
   "dependencies": {
     "webtorrent": "^3.0.21"
   },
   "devDependencies": {
     "cross-env": "^7.0.3",
-    "electron": "^43.2.0",
-    "electron-builder": "^26.15.3"
-  },
-  "build": {
-    "appId": "com.orion.client",
-    "productName": "Orion",
-    "directories": {
-      "output": "dist"
-    },
-    "files": [
-      "main.js",
-      "preload.js",
-      "config.js",
-      "addons.js",
-      "streams.js",
-      "vlc.js",
-      "engine/**/*",
-      "../frontend/dist/**/*"
-    ],
-    "asarUnpack": [
-      "engine/**/*",
-      "node_modules/webtorrent/**/*"
-    ],
-    "win": {
-      "target": "nsis"
-    },
-    "mac": {
-      "target": "dmg"
-    },
-    "linux": {
-      "target": "AppImage",
-      "category": "AudioVideo"
-    }
+    "electron": "^43.2.0"
   }
 }

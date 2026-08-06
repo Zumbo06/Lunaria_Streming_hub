@@ -41,16 +41,19 @@ mpv is the better choice for HDR and needs no installation: an extracted portabl
 
 ### Windows
 
+Lunaria runs from source through its batch files. There is no installer and no packaging step.
+
 ```bat
 setup.bat    :: one time — checks Node, installs everything, builds the
              ::            interface, reports which players it found
 run.bat      :: start Lunaria
-dev.bat      :: start with hot reload (Vite dev server + Electron)
 debug.bat    :: start with the console visible and engine logging on
-dist.bat     :: package a distributable build into electron\dist
+dev.bat      :: start with hot reload (Vite dev server + Electron)
 ```
 
 `setup.bat` refuses to continue on Node older than 22 and warns if neither player is present, since Lunaria decodes nothing itself. mpv is located through Lunaria's own discovery, so an extracted portable folder is found without being installed.
+
+`run.bat` rebuilds the interface whenever its sources are newer than the last build ([scripts/needs-build.js](scripts/needs-build.js)), launches detached so the console can close, and writes everything to `logs\lunaria.log` — a startup crash is recoverable rather than invisible.
 
 ### Any platform
 
@@ -58,7 +61,6 @@ dist.bat     :: package a distributable build into electron\dist
 npm run install:all
 npm run dev       # Vite dev server + Electron
 npm start         # build the frontend, then run Electron against dist/
-npm run dist      # package with electron-builder
 ```
 
 ---
@@ -296,7 +298,7 @@ When an episode finishes, the next one is resolved from the series meta — same
 
 ## Troubleshooting
 
-**Start with `debug.bat`.** `run.bat` launches detached, so nothing is visible but the toast. `debug.bat` keeps the console open with `ORION_DEBUG=1`; copy any line marked `[engine]`, `[engine ERR]` or `[gateway]` when reporting a failure.
+**Two places to look.** `run.bat` launches detached but tees everything to `logs\lunaria.log`, so a crash at startup is still recoverable. For a live view — engine errors, buffering counts, every gateway request — use `debug.bat`, which keeps the console open with `ORION_DEBUG=1`; copy any line marked `[engine]`, `[engine ERR]` or `[gateway]` when reporting a failure.
 
 | Symptom | Where to look |
 | --- | --- |
@@ -379,7 +381,7 @@ Checked against live endpoints on Windows 11 / Node 25.2.1 / Electron 43.2.0.
 ## Known issues
 
 - **`ECONNRESET` / `ERR_STREAM_PREMATURE_CLOSE` lines with `ORION_DEBUG=1` are normal.** Players abort an in-flight response every time they seek; the gateway logs the reset and moves on. They are not playback failures.
-- **`npm audit` reports advisories** in the `electron-builder` toolchain (`minimatch`/`brace-expansion`/`ejs`) and in `webtorrent → torrent-discovery → bittorrent-tracker → ip`. No non-breaking upstream fix exists; do **not** run `npm audit fix --force`, which downgrades WebTorrent out of range.
+- **`npm audit` reports 4 high advisories** in `webtorrent → torrent-discovery → bittorrent-tracker → ip`. No non-breaking upstream fix exists; do **not** run `npm audit fix --force`, which would install `webtorrent@0.7.3` and take the engine with it.
 - **A long 4K session fills the temp drive.** Bounded streaming caps how far *ahead* it fetches, not the total written — watching a 60 GB remux through writes 60 GB. Point `downloadDir` at a drive with room.
 
 ---

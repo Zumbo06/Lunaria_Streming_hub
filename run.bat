@@ -1,5 +1,5 @@
 @echo off
-REM Orion - start the app.
+REM Lunaria - start the app.
 setlocal
 cd /d "%~dp0"
 
@@ -10,18 +10,29 @@ if not exist "electron\node_modules" (
     exit /b 1
 )
 
-REM The built interface is what Electron loads; rebuild if it is missing so a
-REM fresh checkout still starts.
-if not exist "frontend\dist\index.html" (
-    echo Building the interface for the first time...
+REM The built interface is what Electron loads. Rebuild it whenever its sources
+REM are newer than the last build - checking only for a missing folder, as this
+REM script used to, meant every edit was silently ignored.
+node "scripts\needs-build.js"
+if not errorlevel 1 (
+    echo Building the interface...
     call npm run build --prefix frontend || goto :failed
+    echo.
 )
 
-start "" /b cmd /c "npm run start --prefix electron"
+REM Detached, so this window can close - but the output still goes somewhere.
+REM A startup crash used to vanish entirely, leaving nothing to look at.
+if not exist "logs" mkdir "logs"
+start "" /b cmd /c "npm run start --prefix electron > logs\lunaria.log 2>&1"
+
+echo Lunaria is starting.
+echo.
+echo   If the window does not appear, see logs\lunaria.log
+echo   For live engine logging, use debug.bat instead.
 exit /b 0
 
 :failed
 echo.
-echo [ERROR] Could not start Orion - see the output above.
+echo [ERROR] Could not start Lunaria - see the output above.
 pause
 exit /b 1

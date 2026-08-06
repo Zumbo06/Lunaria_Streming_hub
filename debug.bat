@@ -1,5 +1,5 @@
 @echo off
-REM Orion - start the app with its console visible.
+REM Lunaria - start the app with its console visible.
 REM
 REM Same as run.bat, but the window stays open and the engine logs everything it
 REM does: torrent errors, buffering counts and every gateway request. Use this
@@ -14,27 +14,31 @@ if not exist "electron\node_modules" (
     exit /b 1
 )
 
-if not exist "frontend\dist\index.html" (
-    echo Building the interface for the first time...
+node "scripts\needs-build.js"
+if not errorlevel 1 (
+    echo Building the interface...
     call npm run build --prefix frontend || goto :failed
+    echo.
 )
 
+REM The engine's own debug flag keeps its original name - see the note in
+REM README.md about why the code is not renamed.
 set ORION_DEBUG=1
 
-echo Starting Orion with engine logging on.
+echo Starting Lunaria with engine logging on.
 echo Leave this window open - everything the engine reports appears here.
 echo.
 
 call npm run start --prefix electron
 
 echo.
-echo Orion has exited. The log above is scrollable; copy anything marked
+echo Lunaria has exited. The log above is scrollable; copy anything marked
 echo [engine], [engine ERR] or [gateway] when reporting a stream that failed.
 pause
 exit /b 0
 
 :failed
 echo.
-echo [ERROR] Could not start Orion - see the output above.
+echo [ERROR] Could not start Lunaria - see the output above.
 pause
 exit /b 1

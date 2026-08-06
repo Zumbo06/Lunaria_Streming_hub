@@ -1,5 +1,5 @@
 @echo off
-REM Orion - development mode: Vite dev server with hot reload + Electron.
+REM Lunaria - development mode: Vite dev server with hot reload + Electron.
 REM Closing this window stops both.
 setlocal
 cd /d "%~dp0"
