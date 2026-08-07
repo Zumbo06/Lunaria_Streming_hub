@@ -135,6 +135,37 @@ function parseRange(header, size) {
 }
 
 /**
+ * Selects the pieces covering a byte range of the file, returning the exact
+ * bounds it used — `deselect` matches on those, so they have to be handed back
+ * unchanged. WebTorrent tracks a read stream's own selection separately
+ * (`isStreamSelection`), so these never cancel each other out.
+ */
+function selectByteRange(torrent, file, byteStart, byteEnd) {
+  const pieceLength = torrent?.pieceLength || 0
+  if (!pieceLength || byteStart > byteEnd || byteStart >= file.length) return null
+
+  const first = Math.floor((file.offset + byteStart) / pieceLength)
+  const last = Math.floor((file.offset + Math.min(byteEnd, file.length - 1)) / pieceLength)
+
+  try {
+    torrent.select(first, last, 1)
+  } catch {
+    // Torrent went away mid-stream — the previous episode being torn down.
+    return null
+  }
+  return [first, last]
+}
+
+function deselectRange(torrent, range) {
+  if (!torrent || !range) return
+  try {
+    torrent.deselect(range[0], range[1])
+  } catch {
+    /* torrent already gone */
+  }
+}
+
+/**
  * Writes [start, end] to the response as a run of bounded reads. Each
  * `createReadStream` call selects only its own slice and deselects it on
  * completion or client abort, so the download tracks playback instead of
@@ -147,30 +178,59 @@ function parseRange(header, size) {
  * cleanup listeners each time (leaking them on a long file) and gives the
  * client a chance to see the body finish early, which players report as
  * "Transferred a partial file" and treat as end-of-stream.
+ *
+ * The window after the one being served is selected up front. A read stream
+ * selects exactly its own slice and nothing else, so without this the swarm
+ * only ever has the current window in flight — and since WebTorrent marks at
+ * most `min(1 MB / pieceLength, 2)` pieces critical, a 4K release with 16-32 MB
+ * pieces is being fetched one piece at a time. That ceiling sits below the
+ * bitrate, so the player's cache drains to a couple of seconds and stalls there
+ * no matter how large it is allowed to grow.
  */
 function boundedSource(file, start, end, windowBytes) {
+  const torrent = activeTorrent
+
   async function* windows() {
     let cursor = start
     let index = 0
+    // Piece range queued for the window *after* the one being served.
+    let ahead = null
 
-    while (cursor <= end) {
-      const chunkEnd = Math.min(cursor + windowBytes - 1, end)
-      const inner = file.createReadStream({ start: cursor, end: chunkEnd })
-      index += 1
-      debug(`window ${index}: ${cursor}-${chunkEnd} of ${end}`)
+    try {
+      while (cursor <= end) {
+        const chunkEnd = Math.min(cursor + windowBytes - 1, end)
 
-      try {
-        for await (const piece of inner) yield piece
-      } finally {
-        // Releases this window's piece selection when the client goes away
-        // part-way through.
-        inner.destroy()
+        const claimed = ahead
+        ahead =
+          chunkEnd < end
+            ? selectByteRange(torrent, file, chunkEnd + 1, Math.min(chunkEnd + windowBytes, end))
+            : null
+
+        const inner = file.createReadStream({ start: cursor, end: chunkEnd })
+        index += 1
+        debug(`window ${index}: ${cursor}-${chunkEnd} of ${end} (queued ${ahead ? ahead.join('-') : 'none'})`)
+
+        // The read stream owns this window's pieces from here, so the selection
+        // taken out for it on the previous pass is redundant.
+        deselectRange(torrent, claimed)
+
+        try {
+          for await (const piece of inner) yield piece
+        } finally {
+          // Releases this window's piece selection when the client goes away
+          // part-way through.
+          inner.destroy()
+        }
+
+        cursor = chunkEnd + 1
       }
 
-      cursor = chunkEnd + 1
+      debug(`all windows served up to ${cursor - 1}`)
+    } finally {
+      // A seek or a closed player abandons the generator here; the prefetch
+      // must not outlive it, or the swarm keeps working on a discarded window.
+      deselectRange(torrent, ahead)
     }
-
-    debug(`all windows served up to ${cursor - 1}`)
   }
 
   return Readable.from(windows())
@@ -346,7 +406,14 @@ function prebuffer(torrent, file, headBytes, tailBytes) {
 
   const { pieceLength, first, last } = range
 
-  const headEnd = Math.min(first + Math.max(1, Math.ceil(headBytes / pieceLength)) - 1, last)
+  // A byte target alone collapses to a single piece on the 16-32 MB pieces 4K
+  // releases use — two or three seconds of video, so the player opens and runs
+  // out almost immediately. Two pieces is the floor, which also means the read
+  // pipeline starts with a full window already behind it rather than racing the
+  // player from the first frame. 1080p (~1 MB pieces) is unaffected: its byte
+  // target already works out to more than two.
+  const headPieces = Math.max(2, Math.ceil(headBytes / pieceLength))
+  const headEnd = Math.min(first + headPieces - 1, last)
   torrent.select(first, headEnd, 1)
   torrent.critical(first, Math.min(first + 1, headEnd))
 
@@ -383,7 +450,7 @@ function windowStatus(torrent, window) {
  * target on its own and playback was reported ready with nothing at all at the
  * start of the file, which is what the player then failed to open.
  */
-function waitForPrebuffer(torrent, file, windows, headBytes, timeoutMs) {
+function waitForPrebuffer(torrent, file, windows, headBytes, timeoutMs, cancelled = () => false) {
   const head = windows?.head || null
   const tail = windows?.tail || null
   const pieceLength = torrent.pieceLength || 0
@@ -411,6 +478,10 @@ function waitForPrebuffer(torrent, file, windows, headBytes, timeoutMs) {
         numPeers: torrent.numPeers,
         downloadSpeed: torrent.downloadSpeed,
       }
+
+      // Checked before anything is reported: a stop during buffering should
+      // stop the progress messages too, not keep the UI looking busy.
+      if (cancelled()) return resolve({ ok: false, cancelled: true, ...status })
 
       const now = Date.now()
       if (now - lastEmit >= 1000) {
@@ -484,7 +555,7 @@ function cleanupTempDir() {
   ownsTempDir = false
 }
 
-function stop() {
+function stopNow() {
   clearInterval(progressTimer)
   progressTimer = null
 
@@ -498,9 +569,13 @@ function stop() {
   // Retire the URL along with the stream.
   sessionToken = null
 
-  if (!torrent) {
+  // WebTorrent's `_destroy` returns early on an already-destroyed torrent
+  // *without* invoking the callback, so waiting on one would never resolve —
+  // and since teardown is chained below, that would wedge every later stop and
+  // start behind it.
+  if (!torrent || torrent.destroyed) {
     cleanupTempDir()
-    return Promise.resolve(null)
+    return Promise.resolve(torrent && keptPath ? { path: keptPath, complete: completed } : null)
   }
 
   return new Promise((resolve) => {
@@ -511,6 +586,70 @@ function stop() {
       resolve(keptPath ? { path: keptPath, complete: completed } : null)
     })
   })
+}
+
+// Teardowns are chained rather than allowed to overlap a startup. `destroyStore`
+// on an abandoned 4K partial deletes gigabytes, and with a configured
+// `downloadDir` that happens in the very folder the next episode is about to
+// write into. Auto-advance sends `start` about ten seconds after `stop`, so
+// without this the opening pieces of the next episode compete with that delete
+// for the disk — which is why an episode switch stutters where the same release
+// played by hand does not.
+let teardown = Promise.resolve(null)
+
+// Bumped by every stop and every start. A `start` captures the value it began
+// with and re-checks it at each point where it would touch shared state, so an
+// attempt that was cancelled while waiting on metadata or a prebuffer unwinds
+// quietly instead of tearing down whatever replaced it.
+let generation = 0
+
+// Resolvers for whatever a `start` is currently blocked on. Firing them lets a
+// cancelled attempt give up at once rather than sitting out its full metadata
+// timeout with the swarm still running.
+let waiters = new Set()
+
+function abortWaiters() {
+  const pending = waiters
+  waiters = new Set()
+  for (const resolve of pending) resolve()
+}
+
+/** Resolves when the current attempt is cancelled, and never otherwise. */
+function cancellation() {
+  return new Promise((resolve) => waiters.add(resolve))
+}
+
+function stop() {
+  generation += 1
+  abortWaiters()
+  teardown = teardown.catch(() => {}).then(() => stopNow())
+  return teardown
+}
+
+/**
+ * Unwinds a `start` that was cancelled after it had already created a swarm.
+ * The stop that cancelled it may have run before `activeTorrent` was assigned,
+ * leaving an orphan nobody else will clean up; anything that has *replaced* this
+ * attempt is left strictly alone.
+ */
+function abandon(torrent) {
+  if (!torrent) return
+
+  if (activeTorrent === torrent) {
+    // Only ours to clear. If something has already replaced this attempt, the
+    // timer and the token belong to that stream.
+    clearInterval(progressTimer)
+    progressTimer = null
+    activeTorrent = null
+    activeFile = null
+    sessionToken = null
+  }
+
+  try {
+    if (!torrent.destroyed) torrent.destroy({ destroyStore: !keepFiles })
+  } catch {
+    /* already gone */
+  }
 }
 
 async function start(payload) {
@@ -530,6 +669,13 @@ async function start(payload) {
   // One torrent at a time: a previous swarm is torn down before a new one
   // starts, which is the "isolated process tracking" of NFR 5.2.
   await stop()
+
+  // Claimed after the stop above, since that bumps the counter too. From here
+  // on, `cancelled()` is the only thing this attempt is allowed to trust —
+  // `activeTorrent` alone cannot distinguish "nothing is running" from "someone
+  // else is running now".
+  const session = ++generation
+  const cancelled = () => generation !== session
 
   readaheadBytes = requestedReadahead
   keepFiles = Boolean(keepDownloads)
@@ -553,10 +699,22 @@ async function start(payload) {
   })
 
   if (!torrent.ready) {
+    let timer = null
     const gotMetadata = await Promise.race([
       new Promise((resolve) => torrent.once('ready', () => resolve(true))),
-      new Promise((resolve) => setTimeout(() => resolve(false), metadataTimeoutMs)),
+      new Promise((resolve) => {
+        timer = setTimeout(() => resolve(false), metadataTimeoutMs)
+      }),
+      // Stopping during "connecting" used to leave this sitting out the full
+      // minute, and the timeout branch then called the shared `stop` — which by
+      // that point was destroying whichever stream had replaced this one. That
+      // is what made a cancelled connect lock out every source afterwards.
+      cancellation().then(() => false),
     ])
+    clearTimeout(timer)
+
+    if (cancelled()) return abandon(torrent)
+
     if (!gotMetadata) {
       await stop()
       throw new Error('Timed out fetching torrent metadata — no peers responded')
@@ -564,7 +722,7 @@ async function start(payload) {
   }
 
   // `stop` may have run while we were waiting for metadata.
-  if (activeTorrent !== torrent) return
+  if (cancelled()) return abandon(torrent)
 
   const file = pickFile(torrent, fileIdx)
   if (!file) throw new Error('Torrent contains no files')
@@ -606,8 +764,8 @@ async function start(payload) {
 
   // Hand the player a URL only once the head is on disk and the container index
   // at the tail is readable; otherwise it opens, finds no index, and gives up.
-  const status = await waitForPrebuffer(torrent, file, windows, headBufferBytes, bufferTimeoutMs)
-  if (activeTorrent !== torrent) return
+  const status = await waitForPrebuffer(torrent, file, windows, headBufferBytes, bufferTimeoutMs, cancelled)
+  if (cancelled()) return abandon(torrent)
 
   if (!status.ok) {
     // Reporting ready here is what makes VLC open onto a dead stream, so the

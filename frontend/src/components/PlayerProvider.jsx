@@ -159,6 +159,10 @@ export default function PlayerProvider({ children }) {
             title: `Handed to ${result.player}`,
             message: parts.length > 0 ? parts.join(' · ') : stream.filename,
           })
+        } else if (result.code === 'CANCELLED') {
+          // The user stopped this themselves, or replaced it with another
+          // source — nothing to report back to them.
+          setEngine(IDLE_ENGINE)
         } else if (result.code === 'PLAYER_NOT_FOUND') {
           setEngine(IDLE_ENGINE)
           pushToast({

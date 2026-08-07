@@ -233,7 +233,10 @@ function engineStart(stream, settings) {
   const magnetUri = streamsLib.buildMagnet(stream)
 
   return new Promise((resolve, reject) => {
-    settleStart(null, new Error('Superseded by a newer stream request'))
+    settleStart(
+      null,
+      Object.assign(new Error('Superseded by a newer stream request'), { cancelled: true }),
+    )
 
     // Must outlast the engine's own metadata + buffer deadlines, otherwise this
     // fires first and masks the engine's far more specific error. It is reset
@@ -263,6 +266,13 @@ function engineStart(stream, settings) {
 }
 
 function engineStop() {
+  // A stop that lands mid-connect has to settle the in-flight start as well.
+  // The engine answers a cancelled attempt with silence — no `ready`, no
+  // `error` — so without this the play request stays pending behind its guard
+  // timer for minutes: the UI goes idle, but the next source picked is racing a
+  // request that still believes it owns the engine.
+  settleStart(null, Object.assign(new Error('Stopped before playback started'), { cancelled: true }))
+
   if (engineProcess && engineProcess.connected) engineProcess.send({ cmd: 'stop' })
   engineState = { running: false, infoHash: null, url: null, name: null }
 }
@@ -904,6 +914,14 @@ async function startPlayback({ stream, item, subtitle, playerOverride } = {}) {
       hdrArgs: players.hdrArgsFor(playerId, hdr, settings),
     }
   } catch (err) {
+    // Stopping a connect, or picking a different source part-way through it, is
+    // something the user just did on purpose — reporting it as a failure would
+    // put an error toast on top of their own action.
+    if (err.cancelled) {
+      broadcast('play:status', { phase: 'cancelled', stream: stream.filename })
+      return { ok: false, code: 'CANCELLED', error: err.message }
+    }
+
     broadcast('play:status', { phase: 'failed', stream: stream.filename, error: err.message })
     return { ok: false, code: 'PLAY_FAILED', error: err.message }
   }
