@@ -12,6 +12,7 @@ const library = require('./library')
 const subtitlesLib = require('./subtitles')
 const players = require('./players')
 const vlc = require('./vlc')
+const transfer = require('./transfer')
 
 const isDev = process.env.ELECTRON_START_URL != null
 const ENGINE_PATH = path.join(__dirname, 'engine', 'server.mjs')
@@ -38,6 +39,22 @@ function uidFor(manifestUrl) {
   return crypto.createHash('sha1').update(manifestUrl).digest('hex').slice(0, 12)
 }
 
+// Live reachability, keyed by manifest URL. Deliberately not persisted: a
+// status is only worth anything for as long as it is fresh, and a stale
+// "unreachable" carried across a restart would be a lie about an addon that has
+// since recovered.
+const addonHealth = new Map()
+
+function healthFor(addon) {
+  const entry = addonHealth.get(addon.manifestUrl)
+
+  if (!entry) {
+    // Nothing probed yet — the last manifest fetch is the only evidence there is.
+    return { state: addon.error ? 'unreachable' : 'unknown', latencyMs: null, checkedAt: null, error: addon.error || null }
+  }
+  return entry
+}
+
 function publicAddon(addon) {
   return {
     uid: uidFor(addon.manifestUrl),
@@ -53,11 +70,20 @@ function publicAddon(addon) {
     configured: config.hasSecret(addon.manifestUrl),
     enabled: addon.enabled !== false,
     error: addon.error || null,
+    health: healthFor(addon),
   }
 }
 
 function publicAddons() {
   return addonRecords.map(publicAddon)
+}
+
+/** Stores the addon list, notes it for the transfer file, and tells the UI. */
+function persistAddons() {
+  config.saveAddons(addonRecords)
+  transfer.scheduleSave()
+  broadcast('addons:changed', publicAddons())
+  return publicAddons()
 }
 
 function addonByUid(uid) {
@@ -72,6 +98,16 @@ function broadcast(channel, payload) {
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, payload)
 }
 
+/**
+ * Marks the transfer file stale and passes the value straight through, so a
+ * mutating handler can be wrapped without changing its shape. The write itself
+ * is coalesced — see transfer.js.
+ */
+function touched(value) {
+  transfer.scheduleSave()
+  return value
+}
+
 /** Re-fetches every stored manifest so capabilities stay current (REQ-1.1). */
 async function hydrateAddons() {
   const stored = config.getAddons()
@@ -79,10 +115,25 @@ async function hydrateAddons() {
 
   addonRecords = await Promise.all(
     stored.map(async (entry) => {
+      const startedAt = Date.now()
       try {
         const { manifest, manifestUrl } = await addonsLib.fetchManifest(entry.manifestUrl, addonTimeoutMs)
+        // A hydrate is already a round trip to every addon, so the status board
+        // gets populated for free rather than probing everything a second time.
+        addonHealth.set(entry.manifestUrl, {
+          state: 'online',
+          latencyMs: Date.now() - startedAt,
+          checkedAt: Date.now(),
+          error: null,
+        })
         return addonsLib.toAddonRecord(manifest, manifestUrl, entry.enabled !== false)
       } catch (err) {
+        addonHealth.set(entry.manifestUrl, {
+          state: 'unreachable',
+          latencyMs: Date.now() - startedAt,
+          checkedAt: Date.now(),
+          error: err.message,
+        })
         // Keep unreachable addons in the list rather than silently dropping a
         // user's install — the manager surfaces the error instead.
         return {
@@ -98,9 +149,48 @@ async function hydrateAddons() {
     }),
   )
 
-  config.saveAddons(addonRecords)
-  broadcast('addons:changed', publicAddons())
+  persistAddons()
   return addonRecords
+}
+
+/**
+ * Probes reachability without re-hydrating. `hydrateAddons` rewrites every
+ * record from its manifest, which is the wrong tool for "is this thing up?" —
+ * it is slower, it churns the stored config, and it cannot report a status
+ * while it is still running. This marks each target `checking`, pushes that to
+ * the UI, then fills in the answers as they land.
+ */
+async function checkAddons(targets = addonRecords) {
+  if (targets.length === 0) return publicAddons()
+
+  const { addonTimeoutMs } = config.getSettings()
+
+  for (const addon of targets) {
+    addonHealth.set(addon.manifestUrl, { ...healthFor(addon), state: 'checking' })
+  }
+  broadcast('addons:changed', publicAddons())
+
+  await Promise.all(
+    targets.map(async (addon) => {
+      const result = await addonsLib.probe(addon.manifestUrl, addonTimeoutMs)
+
+      addonHealth.set(addon.manifestUrl, {
+        state: result.ok ? 'online' : 'unreachable',
+        latencyMs: result.latencyMs,
+        checkedAt: result.checkedAt,
+        error: result.error,
+      })
+
+      // `enabledAddons` skips anything carrying an error, so a probe is not
+      // only cosmetic: an addon that has come back starts being queried again,
+      // and one that has gone down stops holding up every fan-out. Not written
+      // to config — the next hydrate is the authority on what gets stored.
+      addon.error = result.ok ? null : result.error
+    }),
+  )
+
+  broadcast('addons:changed', publicAddons())
+  return publicAddons()
 }
 
 // ---- P2P engine process ----
@@ -336,6 +426,7 @@ function recordProgress(session, status) {
     durationSeconds: status.lengthSeconds,
   })
   session.last = { ...status, ...saved }
+  transfer.scheduleSave()
   return saved
 }
 
@@ -467,7 +558,7 @@ ipcMain.handle('settings:get', () => config.getSettings())
 
 ipcMain.handle('settings:save', (event, patch) => {
   if (patch && ('vlcPath' in patch || 'mpvPath' in patch)) players.invalidateCache()
-  return config.saveSettings(patch || {})
+  return touched(config.saveSettings(patch || {}))
 })
 
 ipcMain.handle('cache:clear', () => {
@@ -546,6 +637,11 @@ ipcMain.handle('addons:refresh', async () => {
   return publicAddons()
 })
 
+ipcMain.handle('addons:check', (event, uid) => {
+  const one = uid ? addonByUid(uid) : null
+  return checkAddons(one ? [one] : addonRecords)
+})
+
 ipcMain.handle('addons:add', async (event, rawUrl) => {
   const { addonTimeoutMs } = config.getSettings()
 
@@ -563,8 +659,7 @@ ipcMain.handle('addons:add', async (event, rawUrl) => {
   try {
     const { manifest, manifestUrl } = await addonsLib.fetchManifest(normalized, addonTimeoutMs)
     addonRecords.push(addonsLib.toAddonRecord(manifest, manifestUrl, true))
-    config.saveAddons(addonRecords)
-    broadcast('addons:changed', publicAddons())
+    persistAddons()
     return { ok: true, addons: publicAddons() }
   } catch (err) {
     return { ok: false, error: err.message }
@@ -573,8 +668,7 @@ ipcMain.handle('addons:add', async (event, rawUrl) => {
 
 ipcMain.handle('addons:remove', (event, uid) => {
   addonRecords = addonRecords.filter((addon) => uidFor(addon.manifestUrl) !== uid)
-  config.saveAddons(addonRecords)
-  broadcast('addons:changed', publicAddons())
+  persistAddons()
   return publicAddons()
 })
 
@@ -582,8 +676,7 @@ ipcMain.handle('addons:toggle', (event, { uid, enabled }) => {
   const addon = addonByUid(uid)
   if (addon) {
     addon.enabled = Boolean(enabled)
-    config.saveAddons(addonRecords)
-    broadcast('addons:changed', publicAddons())
+    persistAddons()
   }
   return publicAddons()
 })
@@ -597,8 +690,7 @@ ipcMain.handle('addons:reorder', (event, uids) => {
   for (const addon of addonRecords) if (!ordered.includes(addon)) ordered.push(addon)
 
   addonRecords = ordered
-  config.saveAddons(addonRecords)
-  broadcast('addons:changed', publicAddons())
+  persistAddons()
   return publicAddons()
 })
 
@@ -1249,20 +1341,20 @@ ipcMain.handle('profiles:select', (event, id) => {
 })
 
 ipcMain.handle('profiles:create', (event, details) => {
-  const profile = library.createProfile(details || {})
+  const profile = touched(library.createProfile(details || {}))
   broadcast('profiles:changed', { current: library.getProfile(activeProfileId()), profiles: library.listProfiles() })
   return profile
 })
 
 ipcMain.handle('profiles:update', (event, { id, ...details }) => {
-  const profile = library.updateProfile(id, details)
+  const profile = touched(library.updateProfile(id, details))
   broadcast('profiles:changed', { current: library.getProfile(activeProfileId()), profiles: library.listProfiles() })
   return profile
 })
 
 ipcMain.handle('profiles:delete', (event, id) => {
   try {
-    const remaining = library.deleteProfile(id)
+    const remaining = touched(library.deleteProfile(id))
     if (currentProfileId === id) currentProfileId = remaining[0]?.id ?? null
     broadcast('profiles:changed', { current: library.getProfile(activeProfileId()), profiles: remaining })
     return { ok: true, profiles: remaining }
@@ -1273,10 +1365,10 @@ ipcMain.handle('profiles:delete', (event, id) => {
 
 ipcMain.handle('watchlist:get', () => library.getWatchlist(activeProfileId()))
 
-ipcMain.handle('watchlist:add', (event, item) => library.addToWatchlist(activeProfileId(), item))
+ipcMain.handle('watchlist:add', (event, item) => touched(library.addToWatchlist(activeProfileId(), item)))
 
 ipcMain.handle('watchlist:remove', (event, { type, id }) =>
-  library.removeFromWatchlist(activeProfileId(), type, id),
+  touched(library.removeFromWatchlist(activeProfileId(), type, id)),
 )
 
 ipcMain.handle('watchlist:has', (event, { type, id }) => library.inWatchlist(activeProfileId(), type, id))
@@ -1327,10 +1419,10 @@ ipcMain.handle('progress:get', (event, { type, videoId }) =>
 )
 
 ipcMain.handle('progress:clear', (event, { type, videoId }) =>
-  library.clearProgress(activeProfileId(), type, videoId),
+  touched(library.clearProgress(activeProfileId(), type, videoId)),
 )
 
-ipcMain.handle('progress:clearAll', () => library.clearAllProgress(activeProfileId()))
+ipcMain.handle('progress:clearAll', () => touched(library.clearAllProgress(activeProfileId())))
 
 ipcMain.handle('library:stats', () => library.stats(activeProfileId()))
 
@@ -1398,10 +1490,93 @@ ipcMain.handle('vlc:locate', async () => {
   return { path: chosen }
 })
 
+// ---- IPC: transfer file ----
+
+ipcMain.handle('transfer:status', () => transfer.status())
+
+ipcMain.handle('transfer:save', () => {
+  const written = transfer.saveNow({ force: true })
+  return written ? { ok: true, ...written } : { ok: false, error: 'Could not write the transfer file' }
+})
+
+ipcMain.handle('transfer:reveal', () => {
+  const target = transfer.defaultPath()
+  if (!fs.existsSync(target)) transfer.saveNow({ force: true })
+  shell.showItemInFolder(target)
+  return { ok: true }
+})
+
+/** Writes a copy wherever the user asks, for carrying to the other machine. */
+ipcMain.handle('transfer:export', async () => {
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: 'Export Lunaria config',
+    defaultPath: transfer.FILE_NAME,
+    filters: [{ name: 'Lunaria config', extensions: ['json'] }],
+  })
+
+  if (result.canceled || !result.filePath) return { ok: false, cancelled: true }
+
+  try {
+    const written = transfer.writeTo(result.filePath)
+    return { ok: true, path: written.path, bytes: written.bytes, summary: transfer.describe(written.snapshot) }
+  } catch (err) {
+    return { ok: false, error: err.message }
+  }
+})
+
+/**
+ * Two steps on purpose: the first reads the file and reports what is in it, so
+ * the user sees whose profiles they are about to merge in before anything is
+ * written. Passing `apply` performs it.
+ */
+ipcMain.handle('transfer:import', async (event, { file, apply = false, mode = 'merge' } = {}) => {
+  let source = file
+
+  if (!source) {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: 'Import Lunaria config',
+      properties: ['openFile'],
+      filters: [{ name: 'Lunaria config', extensions: ['json'] }],
+    })
+    if (result.canceled || result.filePaths.length === 0) return { ok: false, cancelled: true }
+    source = result.filePaths[0]
+  }
+
+  let snapshot
+  try {
+    snapshot = transfer.read(source)
+  } catch (err) {
+    return { ok: false, error: err.message }
+  }
+
+  const summary = transfer.describe(snapshot)
+  if (!apply) return { ok: true, preview: true, file: source, summary }
+
+  try {
+    const applied = transfer.applySnapshot(snapshot, { mode })
+
+    // Addons arrive as bare URLs; hydrating fills in their manifests and gives
+    // the status board something real to show.
+    await hydrateAddons()
+    broadcast('profiles:changed', {
+      current: library.getProfile(activeProfileId()),
+      profiles: library.listProfiles(),
+    })
+
+    return { ok: true, file: source, summary, applied }
+  } catch (err) {
+    return { ok: false, error: err.message }
+  }
+})
+
 // ---- Lifecycle ----
 
 app.whenReady().then(() => {
   library.init()
+  // Before the window opens, so a fresh install that was handed a config file
+  // comes up already wearing it rather than flashing an empty first-run state.
+  transfer.adoptIfFresh()
+
   createWindow()
   sweepStaleTempDirs()
   hydrateAddons().catch((err) => console.error('[main] Addon hydration failed:', err.message))
@@ -1420,5 +1595,7 @@ app.on('before-quit', () => {
   stopPlaybackTracking()
   killEngine()
   subtitlesLib.cleanup()
+  // Before the database closes: the flush reads through it.
+  transfer.flush()
   library.close()
 })

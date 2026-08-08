@@ -41,6 +41,10 @@ const DEFAULT_SETTINGS = {
   // Ordered: sources carrying the first available language rank highest, and
   // the detail panel filters to it when anything matches.
   preferredAudioLanguages: [],
+  // Keep `lunaria-config.json` in the userData folder up to date, so a fresh
+  // install can be handed one and come up as this one. It holds profiles,
+  // watch history and addon URLs in clear text — see transfer.js.
+  autoBackup: true,
   headBufferBytes: 4 * 1024 * 1024,
   tailBufferBytes: 8 * 1024 * 1024,
   readaheadBytes: 24 * 1024 * 1024,

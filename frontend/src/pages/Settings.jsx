@@ -1,10 +1,10 @@
 import { useEffect, useState } from 'react'
 import {
-  Check, FileCog, FolderOpen, ImagePlus, Loader2, MonitorPlay, RotateCw, Search,
-  ShieldCheck, ShieldOff, Trash2, UserPlus, X,
+  Check, Download, FileCog, FolderOpen, ImagePlus, Loader2, MonitorPlay, RotateCw, Save, Search,
+  ShieldCheck, ShieldOff, Trash2, Upload, UserPlus, X,
 } from 'lucide-react'
 import Badge from '../components/Badge.jsx'
-import { appApi, playersApi, progressApi, settingsApi } from '../api/orion.js'
+import { appApi, formatAgo, formatBytes, playersApi, progressApi, settingsApi, transferApi } from '../api/orion.js'
 import { usePlayer } from '../components/PlayerProvider.jsx'
 import { useProfile } from '../components/ProfileProvider.jsx'
 import { useTheme } from '../components/ThemeProvider.jsx'
@@ -30,6 +30,8 @@ export default function SettingsPage() {
   const [dirty, setDirty] = useState(false)
   const [saving, setSaving] = useState(false)
   const [detecting, setDetecting] = useState(false)
+  const [backup, setBackup] = useState(null)
+  const [backupBusy, setBackupBusy] = useState(false)
 
   useEffect(() => {
     Promise.all([settingsApi.get(), appApi.info(), progressApi.stats(), playersApi.detect()]).then(
@@ -43,6 +45,7 @@ export default function SettingsPage() {
     // Scanning the disk for extracted builds is slower, so it lands separately.
     playersApi.portable().then(setPortable)
     playersApi.mpvConfigStatus().then(setMpvConf)
+    transferApi.status().then(setBackup)
   }, [current?.id])
 
   // The preview reflects the chosen tone-mapping mode, so refresh on change.
@@ -146,6 +149,7 @@ export default function SettingsPage() {
       resumePlayback: settings.resumePlayback !== false,
       resumeAction: settings.resumeAction === 'highlight' ? 'highlight' : 'play',
       autoPlayNext: settings.autoPlayNext !== false,
+      autoBackup: settings.autoBackup !== false,
       headBufferBytes: Number(settings.headBufferBytes) || 4 * 1024 * 1024,
       tailBufferBytes: Number(settings.tailBufferBytes) || 8 * 1024 * 1024,
       readaheadBytes: Number(settings.readaheadBytes) || 24 * 1024 * 1024,
@@ -155,7 +159,102 @@ export default function SettingsPage() {
     setInfo(await appApi.info())
     setDirty(false)
     setSaving(false)
+    setBackup(await transferApi.status())
     pushToast({ tone: 'success', title: 'Settings saved' })
+  }
+
+  // ---- Transfer file ----
+
+  async function saveBackupNow() {
+    setBackupBusy(true)
+    try {
+      const result = await transferApi.save()
+      setBackup(await transferApi.status())
+      pushToast(
+        result.ok
+          ? { tone: 'success', title: 'Config file written', message: result.path }
+          : { tone: 'error', title: 'Could not write it', message: result.error },
+      )
+    } finally {
+      setBackupBusy(false)
+    }
+  }
+
+  async function exportBackup() {
+    const result = await transferApi.export()
+    if (result.cancelled) return
+
+    pushToast(
+      result.ok
+        ? {
+            tone: 'success',
+            title: 'Config exported',
+            message: `${result.summary.profiles.length} profiles · ${result.summary.addonCount} addons · ${formatBytes(result.bytes)}`,
+            duration: 0,
+            action: { label: 'Show in folder', run: () => appApi.showInFolder(result.path) },
+          }
+        : { tone: 'error', title: 'Export failed', message: result.error },
+    )
+  }
+
+  /**
+   * Reads the file and reports what is in it before writing anything, so the
+   * confirmation names the profiles about to be merged in rather than asking
+   * the user to approve a filename.
+   */
+  async function importBackup() {
+    const preview = await transferApi.inspect()
+    if (preview.cancelled) return
+
+    if (!preview.ok) {
+      pushToast({ tone: 'error', title: 'Could not read that config', message: preview.error })
+      return
+    }
+
+    const { summary } = preview
+    const names = summary.profiles.map((profile) => profile.name).join(', ') || 'none'
+    const history = summary.profiles.reduce((total, profile) => total + profile.progressCount, 0)
+
+    const confirmed = window.confirm(
+      `Import this config?
+
+` +
+        `Profiles: ${names}
+` +
+        `Addons: ${summary.addonCount}
+` +
+        `History entries: ${history}
+` +
+        `Exported: ${summary.exportedAt ? new Date(summary.exportedAt).toLocaleString() : 'unknown'}
+
+` +
+        `Profiles are matched by name and their history merged. Player paths and the download folder ` +
+        `stay as they are on this machine.`,
+    )
+    if (!confirmed) return
+
+    setBackupBusy(true)
+    try {
+      const result = await transferApi.import(preview.file)
+
+      if (!result.ok) {
+        pushToast({ tone: 'error', title: 'Import failed', message: result.error })
+        return
+      }
+
+      setSettings(await settingsApi.get())
+      setBackup(await transferApi.status())
+      pushToast({
+        tone: 'success',
+        title: 'Config imported',
+        message:
+          `${result.applied.profiles} profiles · ${result.applied.addons} new addons · ` +
+          `${result.applied.progress} history entries`,
+        duration: 0,
+      })
+    } finally {
+      setBackupBusy(false)
+    }
   }
 
   async function detect() {
@@ -877,6 +976,75 @@ export default function SettingsPage() {
           <RotateCw size={13} />
           Clear cached addon responses
         </button>
+      </Section>
+
+      <Section
+        title="Backup & transfer"
+        subtitle="One file that turns a fresh install into this one — profiles, history, settings and addons."
+      >
+        <Toggle
+          label="Keep the config file up to date"
+          hint="Rewritten a few seconds after anything changes, and on quit."
+          checked={settings.autoBackup !== false}
+          onChange={() => update({ autoBackup: settings.autoBackup === false })}
+        />
+
+        <div className="rounded-lg bg-ink-850 p-3.5 ring-1 ring-white/5">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-[12px] font-medium text-slate-200">{backup?.exists ? 'Saved' : 'Not written yet'}</span>
+            {backup?.exists && (
+              <>
+                <Badge tone="muted">{formatBytes(backup.bytes) || '0 B'}</Badge>
+                <span className="text-[11.5px] text-ink-500">updated {formatAgo(backup.modifiedAt) || 'just now'}</span>
+              </>
+            )}
+          </div>
+          <p className="mt-1.5 break-all font-mono text-[11px] text-ink-500">{backup?.path}</p>
+          <p className="mt-2 text-[11.5px] leading-snug text-haze">
+            Copy this file into the same folder on the new machine <em>before</em> first launch and Lunaria adopts it
+            on startup. It has to be readable there, so it is not encrypted: it holds your watch history and your
+            addon URLs — including any Debrid token inside one — in clear text.
+          </p>
+        </div>
+
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={saveBackupNow}
+            disabled={backupBusy}
+            className="focus-ring flex items-center gap-1.5 rounded-lg bg-ink-800 px-3 py-2 text-[12px] font-medium text-slate-200 transition hover:bg-ink-700 disabled:opacity-50"
+          >
+            {backupBusy ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />}
+            Write it now
+          </button>
+          <button
+            type="button"
+            onClick={exportBackup}
+            className="focus-ring flex items-center gap-1.5 rounded-lg bg-ink-800 px-3 py-2 text-[12px] font-medium text-slate-200 transition hover:bg-ink-700"
+          >
+            <Download size={13} />
+            Export a copy…
+          </button>
+          <button
+            type="button"
+            onClick={importBackup}
+            disabled={backupBusy}
+            className="focus-ring flex items-center gap-1.5 rounded-lg bg-ink-800 px-3 py-2 text-[12px] font-medium text-slate-200 transition hover:bg-ink-700 disabled:opacity-50"
+          >
+            <Upload size={13} />
+            Import…
+          </button>
+          {backup?.exists && (
+            <button
+              type="button"
+              onClick={() => transferApi.reveal()}
+              className="focus-ring flex items-center gap-1.5 rounded-lg bg-ink-800 px-3 py-2 text-[12px] font-medium text-slate-200 transition hover:bg-ink-700"
+            >
+              <FolderOpen size={13} />
+              Show in folder
+            </button>
+          )}
+        </div>
       </Section>
 
       <Section title="About">

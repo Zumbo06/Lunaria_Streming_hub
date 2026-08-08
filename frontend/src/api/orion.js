@@ -31,6 +31,7 @@ const api = bridge || {
   engine: noBridge,
   players: noBridge,
   vlc: noBridge,
+  transfer: noBridge,
 }
 
 export const appApi = api.app
@@ -48,6 +49,7 @@ export const progressApi = api.progress
 export const engineApi = api.engine
 export const playersApi = api.players
 export const vlcApi = api.vlc
+export const transferApi = api.transfer
 
 let counter = 0
 export function nextRequestId() {
@@ -79,6 +81,23 @@ export function formatRemaining(positionSeconds, durationSeconds) {
   const minutes = Math.round(left / 60)
   if (minutes < 60) return `${minutes}m left`
   return `${Math.floor(minutes / 60)}h ${minutes % 60}m left`
+}
+
+/** "3 minutes ago" / "2 days ago" — relative time for status and save stamps. */
+export function formatAgo(timestamp) {
+  if (!timestamp) return null
+
+  const seconds = Math.round((Date.now() - timestamp) / 1000)
+  if (seconds < 5) return 'just now'
+  if (seconds < 60) return `${seconds}s ago`
+
+  const minutes = Math.round(seconds / 60)
+  if (minutes < 60) return `${minutes}m ago`
+
+  const hours = Math.round(minutes / 60)
+  if (hours < 24) return `${hours}h ago`
+
+  return `${Math.round(hours / 24)}d ago`
 }
 
 export function formatRuntime(runtime) {

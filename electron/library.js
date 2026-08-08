@@ -437,6 +437,136 @@ function clearAllProgress(profileId) {
   return true
 }
 
+// ---- Transfer ----
+//
+// Everything above keeps payloads sealed with the OS keychain, which is bound
+// to this user on this machine — copying `library.db` to another one yields
+// rows nothing can decrypt. Moving a profile therefore has to go through
+// decrypted values, which is what these two pairs of functions are for.
+
+/** Every watchlist row for a profile, with its original timestamp. */
+function exportWatchlist(profileId) {
+  return db
+    .prepare('SELECT payload, added_at FROM watchlist WHERE profile_id = ? ORDER BY added_at DESC')
+    .all(profileId)
+    .map((row) => ({ ...(unseal(row.payload) || {}), addedAt: row.added_at }))
+    .filter((item) => item.id)
+}
+
+/**
+ * Every progress row for a profile — not just the unfinished ones
+ * `getContinueWatching` returns, since a restored profile should know what it
+ * has already watched too.
+ */
+function exportProgress(profileId) {
+  return db
+    .prepare(
+      `SELECT payload, position_seconds, duration_seconds, percent, finished, updated_at
+         FROM progress WHERE profile_id = ? ORDER BY updated_at DESC`,
+    )
+    .all(profileId)
+    .map((row) => ({
+      ...(unseal(row.payload) || {}),
+      positionSeconds: row.position_seconds,
+      durationSeconds: row.duration_seconds,
+      percent: row.percent,
+      finished: Boolean(row.finished),
+      updatedAt: row.updated_at,
+    }))
+    .filter((entry) => entry.id)
+}
+
+/**
+ * Restores rows verbatim, timestamps included — `addToWatchlist` and
+ * `saveProgress` both stamp "now", which would collapse a restored history into
+ * a single moment and scramble the order of Continue watching.
+ */
+function importWatchlist(profileId, items) {
+  const insert = db.prepare(
+    'INSERT OR REPLACE INTO watchlist (profile_id, item_key, payload, added_at) VALUES (?, ?, ?, ?)',
+  )
+  let written = 0
+
+  for (const item of items || []) {
+    if (!item?.id || !item?.type) continue
+    insert.run(
+      profileId,
+      keyFor(item.type, item.id),
+      seal({
+        type: item.type,
+        id: item.id,
+        name: item.name || '',
+        poster: item.poster || null,
+        year: item.year || '',
+      }),
+      Number(item.addedAt) || Date.now(),
+    )
+    written += 1
+  }
+
+  return written
+}
+
+function importProgress(profileId, entries) {
+  const insert = db.prepare(
+    `INSERT INTO progress
+       (profile_id, video_key, series_key, payload, position_seconds, duration_seconds, percent, finished, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT (profile_id, video_key) DO UPDATE SET
+       payload = excluded.payload,
+       position_seconds = excluded.position_seconds,
+       duration_seconds = excluded.duration_seconds,
+       percent = excluded.percent,
+       finished = excluded.finished,
+       updated_at = excluded.updated_at
+     WHERE excluded.updated_at > progress.updated_at`,
+  )
+  let written = 0
+
+  for (const entry of entries || []) {
+    if (!entry?.id || !entry?.type) continue
+
+    const videoId = entry.videoId || entry.id
+    const duration = Number(entry.durationSeconds) || 0
+    const position = Number(entry.positionSeconds) || 0
+    const percent = Number.isFinite(entry.percent)
+      ? entry.percent
+      : duration > 0
+        ? Math.min(1, position / duration)
+        : 0
+
+    insert.run(
+      profileId,
+      keyFor(entry.type, videoId),
+      keyFor(entry.type, entry.id),
+      seal({
+        type: entry.type,
+        id: entry.id,
+        videoId,
+        name: entry.name || '',
+        poster: entry.poster || null,
+        season: entry.season ?? null,
+        episode: entry.episode ?? null,
+        source: entry.source || null,
+        subtitle: entry.subtitle || null,
+      }),
+      position,
+      duration,
+      percent,
+      entry.finished || percent >= FINISHED_AT ? 1 : 0,
+      Number(entry.updatedAt) || Date.now(),
+    )
+    written += 1
+  }
+
+  return written
+}
+
+/** Matches an incoming profile to an existing one by name, for merge imports. */
+function findProfileByName(name) {
+  return listProfiles().find((profile) => profile.name === name) || null
+}
+
 function stats(profileId) {
   const watchlistCount = db
     .prepare('SELECT COUNT(*) AS n FROM watchlist WHERE profile_id = ?')
@@ -471,5 +601,10 @@ module.exports = {
   getFinishedSeries,
   clearProgress,
   clearAllProgress,
+  exportWatchlist,
+  exportProgress,
+  importWatchlist,
+  importProgress,
+  findProfileByName,
   stats,
 }

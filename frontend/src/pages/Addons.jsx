@@ -1,17 +1,36 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
+  Activity,
   AlertTriangle,
   ChevronDown,
   ChevronUp,
+  CircleSlash,
   Loader2,
   Plus,
   Puzzle,
   RefreshCw,
   ShieldCheck,
   Trash2,
+  Wifi,
+  WifiOff,
 } from 'lucide-react'
-import { addonsApi } from '../api/orion.js'
+import { addonsApi, formatAgo } from '../api/orion.js'
 import Badge from '../components/Badge.jsx'
+
+/**
+ * How an addon presents in the list. `enabled: false` wins over reachability —
+ * a switched-off addon is not being asked anything, so whether it would answer
+ * is not the useful fact about it.
+ */
+function statusOf(addon) {
+  if (!addon.enabled) return { key: 'disabled', label: 'OFF', tone: 'muted', Icon: CircleSlash }
+  if (addon.health?.state === 'checking') return { key: 'checking', label: 'CHECKING', tone: 'muted', Icon: Loader2 }
+  if (addon.health?.state === 'online') return { key: 'online', label: 'ONLINE', tone: 'green', Icon: Wifi }
+  if (addon.health?.state === 'unreachable' || addon.error) {
+    return { key: 'unreachable', label: 'UNREACHABLE', tone: 'red', Icon: WifiOff }
+  }
+  return { key: 'unknown', label: 'NOT CHECKED', tone: 'muted', Icon: Activity }
+}
 
 /**
  * Addon manager (UI 3.1). Manifest URLs are never rendered raw — the main
@@ -23,6 +42,7 @@ export default function Addons() {
   const [url, setUrl] = useState('')
   const [adding, setAdding] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
+  const [checking, setChecking] = useState(false)
   const [error, setError] = useState(null)
 
   const load = useCallback(async () => {
@@ -33,6 +53,18 @@ export default function Addons() {
     load()
     return addonsApi.onChanged(setAddons)
   }, [load])
+
+  // Opening the tab is the moment the status matters, so it is checked then
+  // rather than left showing whatever the last startup hydrate happened to see.
+  useEffect(() => {
+    addonsApi.check().catch(() => {})
+  }, [])
+
+  const tally = useMemo(() => {
+    const counts = { online: 0, unreachable: 0, disabled: 0, checking: 0, unknown: 0 }
+    for (const addon of addons) counts[statusOf(addon).key] += 1
+    return counts
+  }, [addons])
 
   async function add(event) {
     event.preventDefault()
@@ -57,6 +89,15 @@ export default function Addons() {
     setRefreshing(false)
   }
 
+  async function checkAll() {
+    setChecking(true)
+    try {
+      setAddons(await addonsApi.check())
+    } finally {
+      setChecking(false)
+    }
+  }
+
   async function move(index, direction) {
     const next = [...addons]
     const target = index + direction
@@ -75,16 +116,67 @@ export default function Addons() {
             Lunaria carries no catalog of its own — every title and stream below comes from an addon you install here.
           </p>
         </div>
-        <button
-          type="button"
-          onClick={refresh}
-          disabled={refreshing}
-          className="focus-ring flex shrink-0 items-center gap-1.5 rounded-lg bg-ink-800 px-3 py-2 text-[12px] font-medium text-slate-200 transition hover:bg-ink-700 disabled:opacity-50"
-        >
-          <RefreshCw size={13} className={refreshing ? 'animate-spin' : ''} />
-          Refresh
-        </button>
+        <div className="flex shrink-0 items-center gap-2">
+          <button
+            type="button"
+            onClick={checkAll}
+            disabled={checking || addons.length === 0}
+            title="Ask every addon whether it is answering right now"
+            className="focus-ring flex items-center gap-1.5 rounded-lg bg-ink-800 px-3 py-2 text-[12px] font-medium text-slate-200 transition hover:bg-ink-700 disabled:opacity-50"
+          >
+            <Activity size={13} className={checking ? 'animate-pulse' : ''} />
+            Check status
+          </button>
+          <button
+            type="button"
+            onClick={refresh}
+            disabled={refreshing}
+            title="Re-read every manifest, picking up new catalogs and capabilities"
+            className="focus-ring flex items-center gap-1.5 rounded-lg bg-ink-800 px-3 py-2 text-[12px] font-medium text-slate-200 transition hover:bg-ink-700 disabled:opacity-50"
+          >
+            <RefreshCw size={13} className={refreshing ? 'animate-spin' : ''} />
+            Refresh
+          </button>
+        </div>
       </div>
+
+      {addons.length > 0 && (
+        <div className="mb-4 flex flex-wrap items-center gap-x-4 gap-y-1.5 rounded-lg bg-ink-850 px-4 py-2.5 text-[12px] ring-1 ring-white/5">
+          <span className="flex items-center gap-1.5 font-medium text-slate-200">
+            <Activity size={13} className="text-accent" />
+            Status
+          </span>
+          {tally.online > 0 && (
+            <span className="flex items-center gap-1.5 text-emerald-300">
+              <Wifi size={12} />
+              {tally.online} responding
+            </span>
+          )}
+          {tally.unreachable > 0 && (
+            <span className="flex items-center gap-1.5 text-rose-300">
+              <WifiOff size={12} />
+              {tally.unreachable} unreachable
+            </span>
+          )}
+          {tally.checking > 0 && (
+            <span className="flex items-center gap-1.5 text-haze">
+              <Loader2 size={12} className="animate-spin" />
+              {tally.checking} checking
+            </span>
+          )}
+          {tally.disabled > 0 && (
+            <span className="flex items-center gap-1.5 text-ink-500">
+              <CircleSlash size={12} />
+              {tally.disabled} off
+            </span>
+          )}
+          {tally.unreachable > 0 && (
+            <span className="text-ink-500">
+              An unreachable addon is skipped while it is down, and picked up again once it answers.
+            </span>
+          )}
+        </div>
+      )}
 
       <form onSubmit={add} className="mb-3 flex gap-2">
         <input
@@ -122,6 +214,7 @@ export default function Addons() {
             onMove={(direction) => move(index, direction)}
             onToggle={() => addonsApi.toggle(addon.uid, !addon.enabled)}
             onRemove={() => addonsApi.remove(addon.uid)}
+            onCheck={() => addonsApi.check(addon.uid)}
           />
         ))}
 
@@ -136,7 +229,12 @@ export default function Addons() {
   )
 }
 
-function AddonRow({ addon, first, last, onMove, onToggle, onRemove }) {
+function AddonRow({ addon, first, last, onMove, onToggle, onRemove, onCheck }) {
+  const status = statusOf(addon)
+  const { Icon } = status
+  const latency = addon.health?.latencyMs
+  const checkedAgo = formatAgo(addon.health?.checkedAt)
+
   return (
     <div
       className={`flex items-start gap-3.5 rounded-xl bg-ink-850 p-3.5 ring-1 transition ${
@@ -161,11 +259,17 @@ function AddonRow({ addon, first, last, onMove, onToggle, onRemove }) {
               CONFIGURED
             </Badge>
           )}
-          {addon.error && (
-            <Badge tone="red">
-              <AlertTriangle size={10} />
-              UNREACHABLE
-            </Badge>
+          <Badge tone={status.tone} title={addon.health?.error || undefined}>
+            <Icon size={10} className={status.key === 'checking' ? 'animate-spin' : ''} />
+            {status.label}
+          </Badge>
+          {status.key === 'online' && latency != null && (
+            <span className="text-[11px] tabular-nums text-ink-500" title="Manifest round trip">
+              {latency} ms
+            </span>
+          )}
+          {checkedAgo && status.key !== 'checking' && (
+            <span className="text-[11px] text-ink-500">checked {checkedAgo}</span>
           )}
         </div>
 
@@ -189,7 +293,12 @@ function AddonRow({ addon, first, last, onMove, onToggle, onRemove }) {
           {addon.catalogCount > 0 && <Badge tone="muted">{addon.catalogCount} catalogs</Badge>}
         </div>
 
-        {addon.error && <p className="mt-2 text-[11.5px] text-rose-300">{addon.error}</p>}
+        {(addon.health?.error || addon.error) && (
+          <p className="mt-2 flex items-start gap-1.5 text-[11.5px] text-rose-300">
+            <AlertTriangle size={12} className="mt-0.5 shrink-0" />
+            <span>{addon.health?.error || addon.error}</span>
+          </p>
+        )}
       </div>
 
       <div className="flex shrink-0 flex-col items-end gap-2">
@@ -211,6 +320,16 @@ function AddonRow({ addon, first, last, onMove, onToggle, onRemove }) {
             className="focus-ring rounded p-1 text-ink-500 transition enabled:hover:text-slate-200 disabled:opacity-30"
           >
             <ChevronDown size={15} />
+          </button>
+          <button
+            type="button"
+            aria-label="Check this addon"
+            title="Check whether this addon is answering"
+            onClick={onCheck}
+            disabled={status.key === 'checking'}
+            className="focus-ring rounded p-1 text-ink-500 transition enabled:hover:text-accent-soft disabled:opacity-30"
+          >
+            <Activity size={15} />
           </button>
           <button
             type="button"

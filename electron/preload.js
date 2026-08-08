@@ -36,7 +36,19 @@ contextBridge.exposeInMainWorld('orion', {
     toggle: (uid, enabled) => ipcRenderer.invoke('addons:toggle', { uid, enabled }),
     reorder: (uids) => ipcRenderer.invoke('addons:reorder', uids),
     refresh: () => ipcRenderer.invoke('addons:refresh'),
+    // No uid checks every addon.
+    check: (uid) => ipcRenderer.invoke('addons:check', uid),
     onChanged: (handler) => subscribe('addons:changed', handler),
+  },
+
+  transfer: {
+    status: () => ipcRenderer.invoke('transfer:status'),
+    save: () => ipcRenderer.invoke('transfer:save'),
+    reveal: () => ipcRenderer.invoke('transfer:reveal'),
+    export: () => ipcRenderer.invoke('transfer:export'),
+    // Without `apply` this only reads the file back and reports what is in it.
+    inspect: (file) => ipcRenderer.invoke('transfer:import', { file }),
+    import: (file, mode) => ipcRenderer.invoke('transfer:import', { file, apply: true, mode }),
   },
 
   catalog: {

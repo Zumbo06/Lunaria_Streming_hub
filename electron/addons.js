@@ -127,6 +127,34 @@ async function fetchManifest(manifestUrl, timeoutMs = 8000) {
   return { manifest, manifestUrl: url }
 }
 
+/**
+ * Reachability of one addon, as a value rather than an exception. `fetchManifest`
+ * is deliberately uncached, so this reports the addon as it is right now — a
+ * status read off a manifest fetched ten minutes ago would be worse than none.
+ */
+async function probe(manifestUrl, timeoutMs = 8000) {
+  const startedAt = Date.now()
+
+  try {
+    const { manifest } = await fetchManifest(manifestUrl, timeoutMs)
+    return {
+      ok: true,
+      latencyMs: Date.now() - startedAt,
+      checkedAt: Date.now(),
+      version: manifest.version || '',
+      error: null,
+    }
+  } catch (err) {
+    return {
+      ok: false,
+      latencyMs: Date.now() - startedAt,
+      checkedAt: Date.now(),
+      version: null,
+      error: err.message,
+    }
+  }
+}
+
 /** Flattens a fetched manifest into the record shape persisted in config. */
 function toAddonRecord(manifest, manifestUrl, enabled = true) {
   return {
@@ -354,6 +382,7 @@ module.exports = {
   buildStreamUrl,
   buildSubtitlesUrl,
   fetchManifest,
+  probe,
   toAddonRecord,
   getResourceDef,
   supportsResource,
