@@ -216,11 +216,41 @@ function read(file) {
  */
 const MACHINE_SETTINGS = ['vlcPath', 'mpvPath', 'downloadDir', 'enginePort']
 
+/**
+ * Settings that are executable content rather than preferences, and so are
+ * never taken from a config file.
+ *
+ * `mpvExtraArgs` reaches `spawn()` unvalidated and `mpvHdrOptions` is written
+ * verbatim into mpv.conf — and mpv's `--script` is an alias for
+ * `--scripts-append` accepted in *both* CLI arguments and config files, so
+ * either one loads arbitrary Lua that runs as the user at the next playback.
+ * VLC's `--lua-intf` is the same story.
+ *
+ * This file is designed to travel between machines and between people; that is
+ * the entire point of it. So its contents are untrusted input, and a setting
+ * whose value is a program has no business crossing that boundary. The user
+ * sets these on the machine they apply to.
+ */
+const EXECUTABLE_SETTINGS = ['mpvExtraArgs', 'vlcExtraArgs', 'mpvHdrOptions']
+
+/**
+ * Strips both lists, reporting what it dropped — a setting that silently fails
+ * to arrive is its own kind of surprise, so the caller can say so.
+ */
 function importableSettings(incoming) {
   const settings = { ...(incoming || {}) }
+  const dropped = []
+
   for (const key of MACHINE_SETTINGS) delete settings[key]
+
+  for (const key of EXECUTABLE_SETTINGS) {
+    // Only worth mentioning when the file actually carried something.
+    if (settings[key]) dropped.push(key)
+    delete settings[key]
+  }
+
   delete settings.version
-  return settings
+  return { settings, dropped }
 }
 
 /**
@@ -233,12 +263,23 @@ function importableSettings(incoming) {
  * exist, so the auto-created "Me" does not linger beside the real ones.
  */
 function applySnapshot(snapshot, { mode = 'merge' } = {}) {
-  const summary = { profiles: 0, watchlist: 0, progress: 0, addons: 0, settings: false, removedProfiles: 0 }
+  const summary = {
+    profiles: 0,
+    watchlist: 0,
+    progress: 0,
+    addons: 0,
+    settings: false,
+    removedProfiles: 0,
+    // Player-argument settings the file carried and this import refused.
+    droppedSettings: [],
+  }
   const existingIds = library.listProfiles().map((profile) => profile.id)
 
   if (snapshot.settings) {
-    config.saveSettings(importableSettings(snapshot.settings))
+    const { settings, dropped } = importableSettings(snapshot.settings)
+    config.saveSettings(settings)
     summary.settings = true
+    summary.droppedSettings = dropped
   }
 
   if (Array.isArray(snapshot.addons) && snapshot.addons.length > 0) {
@@ -336,6 +377,14 @@ function adoptIfFresh() {
       `[transfer] Fresh install adopted ${FILE_NAME}: ` +
         `${summary.profiles} profiles, ${summary.addons} addons, ${summary.progress} history rows`,
     )
+    if (summary.droppedSettings.length > 0) {
+      // Nothing here happened with the user's confirmation, so an ignored
+      // setting that could have run code is worth a line in the log.
+      console.warn(
+        `[transfer] Ignored player arguments from ${FILE_NAME} (${summary.droppedSettings.join(', ')}) — ` +
+          'those run as code and are not taken from a config file. Set them in Settings.',
+      )
+    }
     return summary
   } catch (err) {
     console.error(`[transfer] Could not adopt ${FILE_NAME}:`, err.message)

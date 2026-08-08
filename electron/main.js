@@ -534,9 +534,47 @@ function createWindow() {
 
   // Poster/backdrop links and addon homepages belong in the system browser.
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url)
+    openExternalSafely(url)
     return { action: 'deny' }
   })
+
+  // The preload bridge is attached to whatever this window is showing, so
+  // navigating it to a remote origin would hand that origin the entire IPC
+  // surface — file dialogs, player launching, the config. Nothing in the app
+  // navigates today (React Router works through the history API, which does not
+  // raise this event), so this only ever fires on something unintended.
+  mainWindow.webContents.on('will-navigate', (event, target) => {
+    if (isAppUrl(target)) return
+
+    event.preventDefault()
+    openExternalSafely(target)
+  })
+}
+
+/** The bundle this window is allowed to show: the built files, or the dev server. */
+function isAppUrl(target) {
+  let parsed
+  try {
+    parsed = new URL(target)
+  } catch {
+    return false
+  }
+
+  if (isDev && process.env.ELECTRON_START_URL) {
+    try {
+      if (parsed.origin === new URL(process.env.ELECTRON_START_URL).origin) return true
+    } catch {
+      /* malformed start URL — fall through to the file check */
+    }
+  }
+
+  if (parsed.protocol !== 'file:') return false
+
+  // Resolved rather than compared as strings, so `..` cannot walk out of the
+  // app directory.
+  const appRoot = path.resolve(__dirname, '..')
+  const requested = path.resolve(decodeURIComponent(parsed.pathname).replace(/^[/\\]([a-zA-Z]:)/, '$1'))
+  return requested === appRoot || requested.startsWith(appRoot + path.sep)
 }
 
 // ---- IPC: app + settings ----
@@ -566,7 +604,31 @@ ipcMain.handle('cache:clear', () => {
   return { ok: true }
 })
 
-ipcMain.handle('app:openExternal', (event, url) => shell.openExternal(url))
+/**
+ * Hands a URL to the OS, but only ever a web one. `shell.openExternal` is a
+ * launcher: on Windows a `file:` URL runs the executable it points at, and a
+ * registered scheme (`ms-msdt:` and friends) starts whatever claimed it. The
+ * URLs that reach here come from addon metadata, so the scheme is not ours to
+ * trust.
+ */
+function openExternalSafely(url) {
+  let protocol
+  try {
+    ;({ protocol } = new URL(url))
+  } catch {
+    return { ok: false, error: 'That is not a valid URL' }
+  }
+
+  if (protocol !== 'http:' && protocol !== 'https:') {
+    console.warn(`[main] Refused to open a non-web URL externally: ${protocol}`)
+    return { ok: false, error: 'Only http and https links can be opened' }
+  }
+
+  shell.openExternal(url)
+  return { ok: true }
+}
+
+ipcMain.handle('app:openExternal', (event, url) => openExternalSafely(url))
 
 ipcMain.handle('app:showInFolder', (event, target) => {
   if (target && fs.existsSync(target)) shell.showItemInFolder(target)

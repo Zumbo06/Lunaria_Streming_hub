@@ -244,12 +244,21 @@ export default function SettingsPage() {
 
       setSettings(await settingsApi.get())
       setBackup(await transferApi.status())
+
+      // Player arguments are never taken from a config file — they run as code.
+      // Saying so beats letting the user wonder why a setting did not arrive.
+      const refused = result.applied.droppedSettings || []
+
       pushToast({
         tone: 'success',
         title: 'Config imported',
         message:
           `${result.applied.profiles} profiles · ${result.applied.addons} new addons · ` +
-          `${result.applied.progress} history entries`,
+          `${result.applied.progress} history entries` +
+          (refused.length > 0
+            ? `. Player arguments in the file (${refused.join(', ')}) were ignored — those run as ` +
+              `code, so set them here instead.`
+            : ''),
         duration: 0,
       })
     } finally {
