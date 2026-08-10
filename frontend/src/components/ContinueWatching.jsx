@@ -63,8 +63,10 @@ function ResumeCard({ entry, resumeAction, onChanged }) {
     }
   }
 
+  // Removing a series takes the whole show off the row, not just the episode on
+  // this card — otherwise the previous episode simply takes its place.
   async function dismiss() {
-    await progressApi.clear(entry.type, entry.videoId || entry.id)
+    await progressApi.clear(entry.type, entry.videoId || entry.id, entry.id)
     onChanged?.()
   }
 

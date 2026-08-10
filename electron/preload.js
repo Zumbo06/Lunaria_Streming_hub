@@ -109,7 +109,9 @@ contextBridge.exposeInMainWorld('orion', {
     continueWatching: (limit) => ipcRenderer.invoke('progress:continue', limit),
     upNext: (limit) => ipcRenderer.invoke('progress:upNext', limit),
     get: (type, videoId) => ipcRenderer.invoke('progress:get', { type, videoId }),
-    clear: (type, videoId) => ipcRenderer.invoke('progress:clear', { type, videoId }),
+    // `id` is the catalogue root — for a series it is what removes the whole
+    // show rather than only the episode on the card.
+    clear: (type, videoId, id) => ipcRenderer.invoke('progress:clear', { type, videoId, id }),
     clearAll: () => ipcRenderer.invoke('progress:clearAll'),
     stats: () => ipcRenderer.invoke('library:stats'),
   },

@@ -1480,9 +1480,19 @@ ipcMain.handle('progress:get', (event, { type, videoId }) =>
   library.getProgress(activeProfileId(), type, videoId),
 )
 
-ipcMain.handle('progress:clear', (event, { type, videoId }) =>
-  touched(library.clearProgress(activeProfileId(), type, videoId)),
-)
+/**
+ * Removes a title from Continue watching. For a series that means the whole
+ * show, not the episode showing on the card: the card is only ever a window
+ * onto the series, so clearing one episode just slides the next one into view.
+ * `id` is the catalogue root; without it there is nothing to clear a series by,
+ * so the single-video delete stays the fallback.
+ */
+ipcMain.handle('progress:clear', (event, { type, videoId, id }) => {
+  const profileId = activeProfileId()
+
+  if (type === 'series' && id) return touched(library.clearSeriesProgress(profileId, type, id))
+  return touched(library.clearProgress(profileId, type, videoId || id))
+})
 
 ipcMain.handle('progress:clearAll', () => touched(library.clearAllProgress(activeProfileId())))
 

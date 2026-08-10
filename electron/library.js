@@ -427,9 +427,28 @@ function getFinishedSeries(profileId, limit = 8) {
     .slice(0, limit)
 }
 
+/** Forgets one video: an episode, or a film. */
 function clearProgress(profileId, type, videoId) {
   db.prepare('DELETE FROM progress WHERE profile_id = ? AND video_key = ?').run(profileId, keyFor(type, videoId))
   return true
+}
+
+/**
+ * Forgets a whole series — every episode row, watched or part-watched.
+ *
+ * Removing a series from Continue watching needs this rather than
+ * `clearProgress`. A film has a single row, so deleting it is the end of it; a
+ * series has one per episode and the row is fed by two queries. Dropping only
+ * the current episode promotes the previous one into its place through
+ * `getContinueWatching`, and once the unfinished rows are gone a finished one
+ * brings the series straight back as an "Up next" card through
+ * `getFinishedSeries`. Both have to go for the card to stay gone.
+ */
+function clearSeriesProgress(profileId, type, id) {
+  const info = db
+    .prepare('DELETE FROM progress WHERE profile_id = ? AND series_key = ?')
+    .run(profileId, keyFor(type, id))
+  return { cleared: Number(info.changes) || 0 }
 }
 
 function clearAllProgress(profileId) {
@@ -600,6 +619,7 @@ module.exports = {
   getContinueWatching,
   getFinishedSeries,
   clearProgress,
+  clearSeriesProgress,
   clearAllProgress,
   exportWatchlist,
   exportProgress,
