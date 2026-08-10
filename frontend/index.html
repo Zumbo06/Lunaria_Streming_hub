@@ -4,9 +4,217 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Lunaria</title>
+
+    <!--
+      The launch screen lives here rather than in a React component so it paints
+      on the very first frame — before the bundle is fetched, parsed or run.
+      Electron holds the window hidden until `ready-to-show`, so the window
+      appears already wearing this instead of flashing an empty background.
+
+      Colours resolve through the theme variables when the stylesheet has landed
+      (a production build links it render-blocking, so it usually has) and fall
+      back to the midnight palette otherwise. The two themes differ only in the
+      last few points of black here, so the fallback is imperceptible.
+
+      `src/splash.js` takes it away once there is something real behind it.
+    -->
+    <style>
+      #splash {
+        position: fixed;
+        inset: 0;
+        z-index: 100;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 34px;
+        background: rgb(var(--ink-950, 8 9 13));
+        opacity: 1;
+        transition: opacity 420ms ease, transform 420ms ease;
+      }
+
+      /* Removed from the DOM straight after, so this only has to cover the fade. */
+      #splash.is-leaving {
+        opacity: 0;
+        transform: scale(1.04);
+        pointer-events: none;
+      }
+
+      #splash .mark {
+        position: relative;
+        width: 140px;
+        height: 140px;
+      }
+
+      /* Bloom behind the disc. Sits under the mark and never scales it. */
+      #splash .glow {
+        position: absolute;
+        inset: -40%;
+        border-radius: 50%;
+        background: radial-gradient(
+          circle at 50% 50%,
+          rgb(var(--accent, 111 141 255) / 0.28) 0%,
+          rgb(var(--accent, 111 141 255) / 0.08) 42%,
+          transparent 70%
+        );
+        opacity: 0;
+        transform: scale(0.6);
+        animation: splash-bloom 900ms cubic-bezier(0.22, 1, 0.36, 1) 480ms forwards;
+      }
+
+      #splash svg {
+        position: relative;
+        display: block;
+        width: 100%;
+        height: 100%;
+      }
+
+      /* 2πr for r=34, so the stroke starts fully retracted and draws to closed.
+         Once closed it settles back to a faint orbit line, so the finished mark
+         is a lit crescent inside a ring rather than two competing shapes. */
+      #splash .ring {
+        stroke-dasharray: 213.6;
+        stroke-dashoffset: 213.6;
+        animation:
+          splash-draw 820ms cubic-bezier(0.65, 0, 0.35, 1) 90ms forwards,
+          splash-ring-settle 520ms ease 880ms forwards;
+      }
+
+      #splash .disc {
+        opacity: 0;
+        transform-origin: 60px 60px;
+        transform: scale(0.82);
+        animation: splash-fill 640ms cubic-bezier(0.22, 1, 0.36, 1) 560ms forwards;
+      }
+
+      #splash .wordmark {
+        display: flex;
+        font: 600 13px/1 Inter, 'Segoe UI', system-ui, sans-serif;
+        color: rgb(var(--haze, 139 147 167));
+        opacity: 0;
+        animation: splash-word 620ms cubic-bezier(0.22, 1, 0.36, 1) 660ms forwards;
+      }
+
+      /* Letters are spaced individually rather than with letter-spacing so the
+         group stays optically centred while the tracking settles — animating
+         letter-spacing alone drifts the word to the left. */
+      #splash .wordmark span {
+        display: block;
+        opacity: 0;
+        transform: translateY(6px);
+        animation: splash-letter 520ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
+      }
+
+      @keyframes splash-draw {
+        to {
+          stroke-dashoffset: 0;
+        }
+      }
+
+      @keyframes splash-ring-settle {
+        to {
+          opacity: 0.42;
+        }
+      }
+
+      @keyframes splash-fill {
+        to {
+          opacity: 1;
+          transform: scale(1);
+        }
+      }
+
+      @keyframes splash-bloom {
+        60% {
+          opacity: 1;
+        }
+        to {
+          opacity: 0.85;
+          transform: scale(1);
+        }
+      }
+
+      @keyframes splash-word {
+        to {
+          opacity: 1;
+        }
+      }
+
+      @keyframes splash-letter {
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+
+      /* Motion is decoration here; the mark still has to arrive. Everything
+         lands at its final state with a single fade instead. */
+      @media (prefers-reduced-motion: reduce) {
+        #splash .glow,
+        #splash .ring,
+        #splash .disc,
+        #splash .wordmark,
+        #splash .wordmark span {
+          animation: none;
+          opacity: 1;
+          transform: none;
+          stroke-dashoffset: 0;
+        }
+
+        #splash .glow {
+          opacity: 0.85;
+        }
+      }
+    </style>
   </head>
   <body class="bg-ink-950 text-slate-100 antialiased">
     <div id="root"></div>
+
+    <div id="splash" role="status" aria-label="Lunaria is starting">
+      <div class="mark">
+        <div class="glow"></div>
+        <svg viewBox="0 0 120 120" aria-hidden="true">
+          <defs>
+            <!-- Crescent: the disc minus a second disc offset up and to the right. -->
+            <mask id="splash-crescent">
+              <circle cx="60" cy="60" r="34" fill="#fff" />
+              <circle cx="79" cy="49" r="30" fill="#000" />
+            </mask>
+            <linearGradient id="splash-sheen" x1="0" y1="1" x2="1" y2="0">
+              <stop offset="0%" stop-color="rgb(var(--accent-dim, 61 77 143))" />
+              <stop offset="55%" stop-color="rgb(var(--accent, 111 141 255))" />
+              <stop offset="100%" stop-color="rgb(var(--accent-soft, 142 164 255))" />
+            </linearGradient>
+          </defs>
+
+          <!-- Drawn first, from the top: rotated so the sweep starts at 12 o'clock. -->
+          <circle
+            class="ring"
+            cx="60"
+            cy="60"
+            r="34"
+            fill="none"
+            stroke="url(#splash-sheen)"
+            stroke-width="1.5"
+            stroke-linecap="round"
+            transform="rotate(-90 60 60)"
+          />
+
+          <circle class="disc" cx="60" cy="60" r="34" fill="url(#splash-sheen)" mask="url(#splash-crescent)" />
+        </svg>
+      </div>
+
+      <div class="wordmark" aria-hidden="true">
+        <span style="animation-delay: 700ms; padding-right: 7px">L</span>
+        <span style="animation-delay: 760ms; padding-right: 7px">U</span>
+        <span style="animation-delay: 820ms; padding-right: 7px">N</span>
+        <span style="animation-delay: 880ms; padding-right: 7px">A</span>
+        <span style="animation-delay: 940ms; padding-right: 7px">R</span>
+        <span style="animation-delay: 1000ms; padding-right: 7px">I</span>
+        <span style="animation-delay: 1060ms">A</span>
+      </div>
+    </div>
+
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

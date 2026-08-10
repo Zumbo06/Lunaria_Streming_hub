@@ -41,7 +41,9 @@ export default function ProfileGate() {
   }
 
   return (
-    <div className="flex h-full flex-col items-center justify-center bg-ink-950 px-6">
+    // Rises in as the launch screen fades over the top of it, so the two read
+    // as one movement rather than a cut.
+    <div className="flex h-full animate-risein flex-col items-center justify-center bg-ink-950 px-6">
       <h1 className="text-[15px] font-bold tracking-[0.2em] text-slate-300">LUNARIA</h1>
       <p className="mt-6 text-2xl font-semibold text-white">Who’s watching?</p>
 

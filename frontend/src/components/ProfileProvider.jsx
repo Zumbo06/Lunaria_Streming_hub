@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
 import { profilesApi } from '../api/orion.js'
+import { dismissSplash } from '../splash.js'
 import ProfileGate from './ProfileGate.jsx'
 
 const ProfileContext = createContext(null)
@@ -76,7 +77,15 @@ export default function ProfileProvider({ children }) {
     [profiles, current, select, create, update, remove, refresh],
   )
 
+  // Profiles are the first thing the window can actually show, so this is the
+  // moment the launch screen has something to hand over to. It fades on its own
+  // schedule from here — see splash.js.
+  useEffect(() => {
+    if (profiles !== null) dismissSplash()
+  }, [profiles])
+
   if (profiles === null) {
+    // Blank on purpose: the launch screen is still painted over the top of it.
     return <div className="flex h-full items-center justify-center bg-ink-950" />
   }
 
