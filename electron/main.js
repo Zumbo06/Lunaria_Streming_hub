@@ -15,7 +15,23 @@ const vlc = require('./vlc')
 const transfer = require('./transfer')
 
 const isDev = process.env.ELECTRON_START_URL != null
-const ENGINE_PATH = path.join(__dirname, 'engine', 'server.mjs')
+
+// The engine is forked as a child process running ESM, and it pulls in native
+// `.node` binaries through WebTorrent. Neither can be loaded from inside an
+// asar archive: `.node` files are not real files there, and Node's ESM loader
+// does not go through Electron's asar patch. So `asarUnpack` in package.json
+// puts the engine and the whole dependency tree on disk beside the archive,
+// and this rewrites the path to point at the copy that really exists.
+//
+// `asarUnpack` deliberately takes all of `node_modules` rather than a list of
+// the packages with native code. On the first packaged build it named them
+// individually, and `utp-native`'s loader shim (`node-gyp-build`) stayed inside
+// the archive — WebTorrent caught the failure, disabled uTP and carried on, so
+// the only symptom was quietly connecting to fewer peers. The production tree
+// is ~28 MB; being selective saves nothing and hides that class of bug.
+const ENGINE_PATH = path
+  .join(__dirname, 'engine', 'server.mjs')
+  .replace(`app.asar${path.sep}`, `app.asar.unpacked${path.sep}`)
 
 let mainWindow = null
 

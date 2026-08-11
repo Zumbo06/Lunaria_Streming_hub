@@ -7,7 +7,7 @@ REM when a stream fails and you need the reason rather than just the toast.
 setlocal
 cd /d "%~dp0"
 
-if not exist "electron\node_modules" (
+if not exist "node_modules" (
     echo Dependencies are missing. Run setup.bat first.
     echo.
     pause
@@ -29,7 +29,7 @@ echo Starting Lunaria with engine logging on.
 echo Leave this window open - everything the engine reports appears here.
 echo.
 
-call npm run start --prefix electron
+call npx electron .
 
 echo.
 echo Lunaria has exited. The log above is scrollable; copy anything marked

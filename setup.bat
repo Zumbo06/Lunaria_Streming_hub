@@ -27,16 +27,13 @@ echo   Node !NODE_FULL!  OK
 echo.
 
 REM ---- Dependencies ----
-echo [1/4] Root tooling ^(concurrently, wait-on, cross-env^)...
+echo [1/3] Electron, WebTorrent and build tooling ^(this one is large^)...
 call npm install --silent || goto :failed
 
-echo [2/4] Frontend ^(React, Vite, Tailwind^)...
+echo [2/3] Frontend ^(React, Vite, Tailwind^)...
 call npm install --prefix frontend --silent || goto :failed
 
-echo [3/4] Electron shell and WebTorrent engine ^(this one is large^)...
-call npm install --prefix electron --silent || goto :failed
-
-echo [4/4] Building the interface...
+echo [3/3] Building the interface...
 call npm run build --prefix frontend --silent || goto :failed
 echo.
 
@@ -81,6 +78,7 @@ echo.
 echo     run.bat     start Lunaria
 echo     debug.bat   start with the console visible and engine logging on
 echo     dev.bat     start with hot reload ^(for development^)
+echo     dist.bat    build the portable release into release\
 echo ============================================================
 echo.
 pause

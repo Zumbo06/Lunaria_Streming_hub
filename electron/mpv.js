@@ -60,16 +60,41 @@ const SKIP_DIRS = new Set([
   'appdata', 'onedrive', '.git', 'perflogs',
 ])
 
+/**
+ * Where "beside Lunaria" actually is.
+ *
+ * Unpackaged that is the repo root, one level up from this file. Packaged it is
+ * not: `__dirname` points inside app.asar, and the portable build unpacks
+ * itself into a temp folder on every run, so `process.execPath` is not where
+ * the user put the exe either. electron-builder sets PORTABLE_EXECUTABLE_DIR to
+ * the folder they actually double-clicked, which is the one they would drop an
+ * mpv folder into.
+ *
+ * Exported so it can be checked without launching Electron.
+ */
+function appNeighbourDir() {
+  if (process.env.PORTABLE_EXECUTABLE_DIR) return process.env.PORTABLE_EXECUTABLE_DIR
+
+  // `resourcesPath` only exists in a packaged app; its absence is the cheapest
+  // reliable "am I running from source" test that does not need `app`.
+  const packaged = typeof process.resourcesPath === 'string' && /app\.asar/.test(__dirname)
+  if (packaged) return path.dirname(process.execPath)
+
+  return path.join(__dirname, '..')
+}
+
 function portableRoots() {
   const home = os.homedir()
+  const beside = appNeighbourDir()
+
   const roots = [
     path.join(home, 'Desktop'),
     path.join(home, 'Downloads'),
     path.join(home, 'Documents'),
     home,
-    // Beside Orion itself, so the whole thing can live on a stick.
-    path.join(__dirname, '..'),
-    path.join(__dirname, '..', 'players'),
+    // Beside Lunaria itself, so the whole thing can live on a stick.
+    beside,
+    path.join(beside, 'players'),
     process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'Programs'),
   ]
 
@@ -561,4 +586,5 @@ module.exports = {
   isExecutableFile,
   tokenizeArgs,
   invalidateCache,
+  appNeighbourDir,
 }

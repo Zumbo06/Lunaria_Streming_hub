@@ -1,21 +1,58 @@
 {
-  "name": "orion",
+  "name": "lunaria",
   "version": "1.0.0",
   "private": true,
-  "description": "Lunaria — Stremio-protocol catalog client that streams into VLC or mpv",
+  "description": "Lunaria \u2014 Stremio-protocol catalog client that streams into VLC or mpv",
+  "author": "Lunaria",
+  "license": "MIT",
+  "main": "electron/main.js",
   "scripts": {
     "dev:frontend": "cd frontend && npm run dev",
-    "dev:electron": "wait-on http://localhost:5173 && cross-env ELECTRON_START_URL=http://localhost:5173 npm run start --prefix electron",
+    "dev:electron": "wait-on http://localhost:5173 && cross-env ELECTRON_START_URL=http://localhost:5173 electron .",
     "dev": "concurrently -k -n vite,electron -c cyan,magenta \"npm:dev:frontend\" \"npm:dev:electron\"",
     "build:frontend": "cd frontend && npm run build",
-    "start": "npm run build:frontend && npm run start --prefix electron",
-    "install:frontend": "cd frontend && npm install",
-    "install:electron": "cd electron && npm install",
-    "install:all": "npm run install:frontend && npm run install:electron"
+    "start": "npm run build:frontend && electron .",
+    "install:all": "npm install && npm install --prefix frontend",
+    "icon": "node scripts/make-icon.js",
+    "dist": "npm run build:frontend && electron-builder"
+  },
+  "dependencies": {
+    "webtorrent": "^3.0.21"
   },
   "devDependencies": {
     "concurrently": "^9.1.2",
     "cross-env": "^7.0.3",
+    "electron": "^43.2.0",
+    "electron-builder": "^25.1.8",
     "wait-on": "^8.0.2"
+  },
+  "build": {
+    "appId": "com.lunaria.app",
+    "productName": "Lunaria",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "electron/**/*",
+      "frontend/dist/**/*",
+      "package.json",
+      "!**/*.map"
+    ],
+    "asarUnpack": [
+      "electron/engine/**",
+      "node_modules/**"
+    ],
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        "portable",
+        "zip"
+      ]
+    },
+    "portable": {
+      "artifactName": "Lunaria-${version}-portable.${ext}"
+    },
+    "compression": "maximum"
   }
 }

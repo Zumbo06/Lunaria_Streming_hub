@@ -29,7 +29,7 @@ Built to [SRs.txt](SRs.txt).
 
 | | |
 | --- | --- |
-| **Node.js 22+** | WebTorrent 3 requires it. Developed on Node 25.2.1. |
+| **Node.js 22+** | Only to run from source or build a release. A packaged release needs no Node at all. Developed on Node 25.2.1. |
 | **A player** | VLC (default) or mpv, selectable in Settings. |
 | **Electron 43** | Installed by setup; bundles Node 24, whose built-in `node:sqlite` is what the library uses — no native module, no rebuild step. |
 
@@ -41,7 +41,18 @@ mpv is the better choice for HDR and needs no installation: an extracted portabl
 
 ### Windows
 
-Lunaria runs from source through its batch files. There is no installer and no packaging step.
+**Just want to use it?** Grab a release — no Node, no build, nothing installed:
+
+| Artifact | What it is |
+| --- | --- |
+| `Lunaria-<version>-portable.exe` | One file. Double-click and it runs. |
+| `Lunaria-<version>-win.zip` | Unzip anywhere. Drop a portable mpv folder beside `Lunaria.exe` and it is found automatically. |
+
+The build is **unsigned**, so Windows SmartScreen warns on first run — *More info → Run anyway*.
+Removing that warning needs a code-signing certificate, which this project does not have.
+Settings and profiles live in `%APPDATA%\Lunaria`.
+
+**Running from source** — needed only to develop or to build a release yourself:
 
 ```bat
 setup.bat    :: one time — checks Node, installs everything, builds the
@@ -49,6 +60,7 @@ setup.bat    :: one time — checks Node, installs everything, builds the
 run.bat      :: start Lunaria
 debug.bat    :: start with the console visible and engine logging on
 dev.bat      :: start with hot reload (Vite dev server + Electron)
+dist.bat     :: build the portable release into release\
 ```
 
 `setup.bat` refuses to continue on Node older than 22 and warns if neither player is present, since Lunaria decodes nothing itself. mpv is located through Lunaria's own discovery, so an extracted portable folder is found without being installed.
@@ -58,10 +70,21 @@ dev.bat      :: start with hot reload (Vite dev server + Electron)
 ### Any platform
 
 ```bash
-npm run install:all
-npm run dev       # Vite dev server + Electron
-npm start         # build the frontend, then run Electron against dist/
+npm run install:all   # root (Electron + WebTorrent + builder), then frontend
+npm run dev           # Vite dev server + Electron
+npm start             # build the frontend, then run Electron against dist/
+npm run icon          # regenerate build/icon.ico from the crescent mark
+npm run dist          # package into release/ (Windows targets)
 ```
+
+Dependencies live in a **single root `package.json`**. That is what lets the packaged app resolve
+`electron/main.js` and `frontend/dist/` from one archive root, so the renderer path inside
+`app.asar` is the same one used from source.
+
+The forked P2P engine and the whole dependency tree are listed under `asarUnpack`: the engine is
+ESM and WebTorrent loads native `.node` bindings, and neither can be read from inside an asar
+archive. Unpacking the tree wholesale rather than naming packages is deliberate — see the comment
+above `ENGINE_PATH` in [electron/main.js](electron/main.js).
 
 ---
 

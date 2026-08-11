@@ -3,7 +3,7 @@ REM Lunaria - start the app.
 setlocal
 cd /d "%~dp0"
 
-if not exist "electron\node_modules" (
+if not exist "node_modules" (
     echo Dependencies are missing. Run setup.bat first.
     echo.
     pause
@@ -23,7 +23,7 @@ if not errorlevel 1 (
 REM Detached, so this window can close - but the output still goes somewhere.
 REM A startup crash used to vanish entirely, leaving nothing to look at.
 if not exist "logs" mkdir "logs"
-start "" /b cmd /c "npm run start --prefix electron > logs\lunaria.log 2>&1"
+start "" /b cmd /c "npx electron . > logs\lunaria.log 2>&1"
 
 echo Lunaria is starting.
 echo.
