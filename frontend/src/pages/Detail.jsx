@@ -272,6 +272,12 @@ export default function Detail() {
       .filter((group) => group.streams.length > 0)
   }, [groups, language])
 
+  const selectedVideo = useMemo(() => {
+    if (!isSeries || !episodeId) return null
+    const season = seasons.find((entry) => entry.season === selectedSeason)
+    return season?.videos.find((item) => (item.id || '') === episodeId) || null
+  }, [isSeries, episodeId, seasons, selectedSeason])
+
   const playItem = useMemo(
     () => ({
       type,
@@ -279,10 +285,14 @@ export default function Detail() {
       videoId: streamTargetId,
       name: meta?.name,
       poster: meta?.poster,
+      background: meta?.background,
       season: isSeries ? Number(selectedSeason) : null,
       episode: isSeries ? episodeNumberFor(seasons, selectedSeason, episodeId) : null,
+      episodeTitle: selectedVideo?.title || selectedVideo?.name || null,
+      releaseInfo: meta?.releaseInfo,
+      imdbRating: meta?.imdbRating,
     }),
-    [type, decodedId, streamTargetId, meta, isSeries, selectedSeason, seasons, episodeId],
+    [type, decodedId, streamTargetId, meta, isSeries, selectedSeason, seasons, episodeId, selectedVideo],
   )
 
   // ---- Render ----
