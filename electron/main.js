@@ -487,6 +487,20 @@ function startPlaybackTracking(playerId, control, item, profileId) {
         finished: saved.finished,
       })
     }
+
+    // Pre-buffer next episode when 3 minutes remain in the current episode
+    const remainingSeconds = status.lengthSeconds - status.timeSeconds
+    if (
+      session.item?.type === 'series' &&
+      remainingSeconds > 0 &&
+      remainingSeconds <= 180 &&
+      !session.prebufferingTriggered
+    ) {
+      session.prebufferingTriggered = true
+      prestageNextEpisode(session).catch((err) => {
+        console.warn('[main] Next episode pre-staging failed:', err.message)
+      })
+    }
   }, POLL_INTERVAL_MS)
 
   playbackSession = session
@@ -649,6 +663,130 @@ ipcMain.handle('app:openExternal', (event, url) => openExternalSafely(url))
 ipcMain.handle('app:showInFolder', (event, target) => {
   if (target && fs.existsSync(target)) shell.showItemInFolder(target)
   return { ok: true }
+})
+
+// ---- IPC: Downloads & Offline Storage ----
+
+const VIDEO_EXTENSIONS_SET = new Set([
+  '.mkv', '.mp4', '.avi', '.mov', '.m4v', '.webm',
+  '.ts', '.m2ts', '.mpg', '.mpeg', '.wmv', '.flv', '.ogv'
+])
+
+function scanDirectoryFiles(dir) {
+  let results = []
+  if (!fs.existsSync(dir)) return results
+
+  try {
+    const entries = fs.readdirSync(dir, { withFileTypes: true })
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name)
+      if (entry.isDirectory()) {
+        results = results.concat(scanDirectoryFiles(fullPath))
+      } else if (entry.isFile()) {
+        const ext = path.extname(entry.name).toLowerCase()
+        if (VIDEO_EXTENSIONS_SET.has(ext)) {
+          try {
+            const stat = fs.statSync(fullPath)
+            results.push({
+              filename: entry.name,
+              path: fullPath,
+              sizeBytes: stat.size,
+              modifiedAt: stat.mtimeMs,
+              ext,
+            })
+          } catch (e) {}
+        }
+      }
+    }
+  } catch (err) {
+    console.error('[main] scanDirectoryFiles error:', err.message)
+  }
+  return results
+}
+
+ipcMain.handle('downloads:list', async () => {
+  const settings = config.getSettings()
+  const downloadDir = resolveDownloadDir(settings)
+  if (!downloadDir || !fs.existsSync(downloadDir)) {
+    return { ok: true, files: [], downloadDir: downloadDir || '', totalSizeBytes: 0 }
+  }
+
+  try {
+    const files = scanDirectoryFiles(downloadDir).sort((a, b) => b.modifiedAt - a.modifiedAt)
+    const totalSizeBytes = files.reduce((sum, f) => sum + f.sizeBytes, 0)
+    return { ok: true, files, downloadDir, totalSizeBytes }
+  } catch (err) {
+    return { ok: false, error: err.message, files: [], downloadDir: downloadDir || '', totalSizeBytes: 0 }
+  }
+})
+
+ipcMain.handle('downloads:play', async (event, filePath) => {
+  if (!filePath || !fs.existsSync(filePath)) {
+    return { ok: false, error: 'File does not exist on disk' }
+  }
+
+  const settings = config.getSettings()
+  const playerId = players.resolveId(settings)
+  const player = players.describe(playerId)
+  const playerPath = await players.find(playerId, settings)
+
+  if (!playerPath) {
+    return { ok: false, error: `${player.name} was not found on this system` }
+  }
+
+  try {
+    const launched = await players.launch(playerId, filePath, {
+      playerPath,
+      networkCaching: settings.networkCaching,
+      extraArgs: playerId === 'mpv' ? settings.mpvExtraArgs : settings.vlcExtraArgs,
+      title: path.basename(filePath),
+    })
+    return { ok: true, pid: launched.pid, player: player.name }
+  } catch (err) {
+    return { ok: false, error: err.message }
+  }
+})
+
+ipcMain.handle('downloads:delete', async (event, filePath) => {
+  if (!filePath) return { ok: false, error: 'No file path provided' }
+  try {
+    if (fs.existsSync(filePath)) {
+      fs.rmSync(filePath, { force: true })
+    }
+    return { ok: true }
+  } catch (err) {
+    return { ok: false, error: err.message }
+  }
+})
+
+ipcMain.handle('downloads:reveal', (event, filePath) => {
+  if (filePath && fs.existsSync(filePath)) {
+    shell.showItemInFolder(filePath)
+  }
+  return { ok: true }
+})
+
+ipcMain.handle('downloads:openFolder', () => {
+  const settings = config.getSettings()
+  const downloadDir = resolveDownloadDir(settings)
+  if (downloadDir && fs.existsSync(downloadDir)) {
+    shell.openPath(downloadDir)
+  }
+  return { ok: true }
+})
+
+ipcMain.handle('downloads:stats', async () => {
+  const settings = config.getSettings()
+  const downloadDir = resolveDownloadDir(settings)
+  const exists = downloadDir && fs.existsSync(downloadDir)
+  const files = exists ? scanDirectoryFiles(downloadDir) : []
+  const totalSizeBytes = files.reduce((sum, f) => sum + f.sizeBytes, 0)
+  return {
+    downloadDir: downloadDir || '',
+    keepDownloads: Boolean(settings.keepDownloads),
+    totalFiles: files.length,
+    totalSizeBytes,
+  }
 })
 
 const AVATAR_MIME = {
@@ -1188,24 +1326,70 @@ async function followOnSubtitle(previous, next) {
   }
 }
 
+let preStagedNext = null
+
+async function prestageNextEpisode(session) {
+  if (config.getSettings().autoPlayNext === false) return
+  if (!session?.item?.id || session.item.type !== 'series') return
+
+  const next = await nextEpisodeFor(session.item)
+  if (!next) return
+
+  const { groups } = await collectStreams(next.type, next.videoId)
+  const stream = pickFollowOnStream(groups, session.item.source)
+  if (!stream) return
+
+  const subtitle = await followOnSubtitle(session.item.subtitle, next)
+
+  preStagedNext = {
+    forItemId: session.item.videoId || session.item.id,
+    next,
+    stream,
+    subtitle,
+    resolvedAt: Date.now(),
+  }
+
+  broadcast('play:nextPreloaded', { next, stream })
+}
+
 async function scheduleAutoAdvance(item, last) {
   if (config.getSettings().autoPlayNext === false) return
   if (!last?.finished) return
 
   cancelAutoAdvance('superseded')
 
-  const next = await nextEpisodeFor(item)
-  if (!next) return
+  let next = null
+  let stream = null
+  let subtitle = null
 
-  const { groups } = await collectStreams(next.type, next.videoId)
-  const stream = pickFollowOnStream(groups, item.source)
-
-  if (!stream) {
-    announceAutoAdvance('unavailable', { next, error: 'No addon offered a stream for the next episode' })
-    return
+  // Use pre-staged metadata from the last 3 minutes of playback if available
+  const targetId = item.videoId || item.id
+  if (
+    preStagedNext &&
+    preStagedNext.forItemId === targetId &&
+    Date.now() - preStagedNext.resolvedAt < 10 * 60 * 1000
+  ) {
+    next = preStagedNext.next
+    stream = preStagedNext.stream
+    subtitle = preStagedNext.subtitle
   }
 
-  const subtitle = await followOnSubtitle(item.subtitle, next)
+  if (!next || !stream) {
+    next = await nextEpisodeFor(item)
+    if (!next) return
+
+    const { groups } = await collectStreams(next.type, next.videoId)
+    stream = pickFollowOnStream(groups, item.source)
+
+    if (!stream) {
+      announceAutoAdvance('unavailable', { next, error: 'No addon offered a stream for the next episode' })
+      return
+    }
+
+    subtitle = await followOnSubtitle(item.subtitle, next)
+  }
+
+  preStagedNext = null
 
   autoAdvance = {
     next,
@@ -1214,7 +1398,9 @@ async function scheduleAutoAdvance(item, last) {
       announceAutoAdvance('starting', { next })
 
       const result = await startPlayback({ stream, item: next, subtitle })
-      if (!result.ok) announceAutoAdvance('failed', { next, error: result.error })
+      if (!result.ok && result.code !== 'CANCELLED') {
+        announceAutoAdvance('failed', { next, error: result.error })
+      }
     }, AUTO_ADVANCE_DELAY_MS),
   }
 

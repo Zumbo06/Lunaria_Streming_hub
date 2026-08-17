@@ -61,13 +61,25 @@ export default function HeroPanel({ items = [] }) {
   const genres = (item.genres || item.genre || []).slice(0, 3)
 
   return (
-    <section
-      className="relative mb-8 h-[340px] overflow-hidden rounded-2xl bg-ink-900 ring-1 ring-white/5 sm:h-[400px]"
-      onMouseEnter={() => setPaused(true)}
-      onMouseLeave={() => setPaused(false)}
-      aria-roledescription="carousel"
-      aria-label="Featured titles"
-    >
+    <div className="relative mb-8">
+      {/* Reactive Ambient Lighting Glow */}
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute -inset-3 rounded-3xl opacity-35 blur-3xl filter saturate-150 transition-all duration-1000"
+        style={{
+          backgroundImage: `url(${item.background || item.poster})`,
+          backgroundSize: 'cover',
+          backgroundPosition: 'center top',
+        }}
+      />
+
+      <section
+        className="relative h-[340px] overflow-hidden rounded-2xl bg-ink-900 shadow-2xl ring-1 ring-white/10 sm:h-[400px]"
+        onMouseEnter={() => setPaused(true)}
+        onMouseLeave={() => setPaused(false)}
+        aria-roledescription="carousel"
+        aria-label="Featured titles"
+      >
       {/* Every slide stays mounted so the crossfade has something to fade to,
           and so switching back does not re-download the artwork. */}
       {items.map((entry, position) => (
@@ -183,7 +195,8 @@ export default function HeroPanel({ items = [] }) {
           </div>
         </>
       )}
-    </section>
+      </section>
+    </div>
   )
 }
 

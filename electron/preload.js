@@ -51,6 +51,15 @@ contextBridge.exposeInMainWorld('orion', {
     import: (file, mode) => ipcRenderer.invoke('transfer:import', { file, apply: true, mode }),
   },
 
+  downloads: {
+    list: () => ipcRenderer.invoke('downloads:list'),
+    play: (filePath) => ipcRenderer.invoke('downloads:play', filePath),
+    delete: (filePath) => ipcRenderer.invoke('downloads:delete', filePath),
+    reveal: (filePath) => ipcRenderer.invoke('downloads:reveal', filePath),
+    openFolder: () => ipcRenderer.invoke('downloads:openFolder'),
+    stats: () => ipcRenderer.invoke('downloads:stats'),
+  },
+
   catalog: {
     shelves: () => ipcRenderer.invoke('catalog:shelves'),
     catalogs: () => ipcRenderer.invoke('catalog:catalogs'),

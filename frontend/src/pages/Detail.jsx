@@ -367,14 +367,28 @@ export default function Detail() {
           </button>
 
           <div className="flex flex-col gap-7 pt-10 sm:flex-row">
-            <div className="w-[210px] shrink-0 overflow-hidden rounded-xl bg-ink-800 shadow-poster ring-1 ring-white/10">
-              {meta.poster ? (
-                <img src={meta.poster} alt={meta.name} decoding="async" className="aspect-[2/3] w-full object-cover" />
-              ) : (
-                <div className="flex aspect-[2/3] items-center justify-center text-ink-500">
-                  {isSeries ? <Tv size={30} /> : <Film size={30} />}
-                </div>
+            {/* Poster with Reactive Ambient Lighting Glow */}
+            <div className="relative group w-[210px] shrink-0">
+              {meta.poster && (
+                <div
+                  aria-hidden="true"
+                  className="pointer-events-none absolute -inset-3 rounded-2xl opacity-50 blur-2xl filter saturate-150 transition-opacity duration-700"
+                  style={{
+                    backgroundImage: `url(${meta.poster})`,
+                    backgroundSize: 'cover',
+                    backgroundPosition: 'center',
+                  }}
+                />
               )}
+              <div className="relative overflow-hidden rounded-xl bg-ink-800 shadow-2xl ring-1 ring-white/10">
+                {meta.poster ? (
+                  <img src={meta.poster} alt={meta.name} decoding="async" className="aspect-[2/3] w-full object-cover" />
+                ) : (
+                  <div className="flex aspect-[2/3] items-center justify-center text-ink-500">
+                    {isSeries ? <Tv size={30} /> : <Film size={30} />}
+                  </div>
+                )}
+              </div>
             </div>
 
             <div className="min-w-0 flex-1 pt-1">

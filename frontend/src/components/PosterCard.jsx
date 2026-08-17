@@ -16,9 +16,22 @@ export default function PosterCard({ meta, width = 'w-[152px]' }) {
   return (
     <Link
       to={`/title/${encodeURIComponent(meta.type)}/${encodeURIComponent(meta.id)}`}
-      className={`group ${width} shrink-0 focus-ring rounded-lg`}
+      className={`group relative ${width} shrink-0 focus-ring rounded-lg`}
       title={meta.name}
     >
+      {/* Dynamic Reactive Ambient Lighting Glow */}
+      {loaded && meta.poster && (
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute -inset-2.5 rounded-2xl opacity-0 blur-xl filter saturate-150 transition-opacity duration-500 group-hover:opacity-70"
+          style={{
+            backgroundImage: `url(${meta.poster})`,
+            backgroundSize: 'cover',
+            backgroundPosition: 'center',
+          }}
+        />
+      )}
+
       <div className="relative aspect-[2/3] overflow-hidden rounded-lg bg-ink-800 shadow-poster ring-1 ring-white/5 transition duration-200 group-hover:shadow-lift group-hover:ring-accent/40">
         {!loaded && !failed && <div className="skeleton absolute inset-0" />}
 

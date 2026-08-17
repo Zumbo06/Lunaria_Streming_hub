@@ -32,6 +32,7 @@ const api = bridge || {
   players: noBridge,
   vlc: noBridge,
   transfer: noBridge,
+  downloads: noBridge,
 }
 
 export const appApi = api.app
@@ -50,6 +51,7 @@ export const engineApi = api.engine
 export const playersApi = api.players
 export const vlcApi = api.vlc
 export const transferApi = api.transfer
+export const downloadsApi = api.downloads
 
 let counter = 0
 export function nextRequestId() {

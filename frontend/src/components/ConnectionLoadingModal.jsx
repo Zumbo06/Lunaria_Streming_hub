@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import {
   AlertTriangle,
   ArrowLeft,
@@ -35,6 +35,7 @@ const RESOLUTION_TONE = {
  * - Poster card with quality & HDR tags
  * - Lunaria brand mark as animated liquid loading bar
  * - Live real-time swarm metrics (Speed, Peers, Buffer, Size)
+ * - Dead Swarm Smart Auto-Failover detector
  * - Minimize & Cancel / Stop controls
  */
 export default function ConnectionLoadingModal({
@@ -44,6 +45,15 @@ export default function ConnectionLoadingModal({
   onCancel,
   onMinimize,
 }) {
+  const { item, stream, subtitle, player, phase: sessionPhase, error } = session || {}
+
+  const isDirect = stream?.kind !== 'p2p'
+  const isSettled = sessionPhase === 'playing' || sessionPhase === 'ready' || engine.phase === 'streaming'
+  const isConnecting = sessionPhase === 'connecting' || sessionPhase === 'starting-engine' || engine.phase === 'connecting'
+  const isBuffering = !isDirect && (sessionPhase === 'buffering' || engine.phase === 'buffering')
+
+  const [elapsedSeconds, setElapsedSeconds] = useState(0)
+
   // Hotkey: Escape to cancel/close
   useEffect(() => {
     if (!open) return undefined
@@ -60,13 +70,6 @@ export default function ConnectionLoadingModal({
   }, [open, onCancel])
 
   if (!open || !session) return null
-
-  const { item, stream, subtitle, player, phase: sessionPhase, error } = session
-
-  const isDirect = stream?.kind !== 'p2p'
-  const isSettled = sessionPhase === 'playing' || sessionPhase === 'ready' || engine.phase === 'streaming'
-  const isConnecting = sessionPhase === 'connecting' || sessionPhase === 'starting-engine' || engine.phase === 'connecting'
-  const isBuffering = !isDirect && (sessionPhase === 'buffering' || engine.phase === 'buffering')
 
   // Calculate buffer percentage
   const bufferPercent =
