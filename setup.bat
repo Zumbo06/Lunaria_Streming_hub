@@ -78,7 +78,7 @@ echo.
 echo     run.bat     start Lunaria
 echo     debug.bat   start with the console visible and engine logging on
 echo     dev.bat     start with hot reload ^(for development^)
-echo     dist.bat    build the portable release into release\
+echo     dist.bat    build the release into release\
 echo ============================================================
 echo.
 pause

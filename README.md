@@ -41,12 +41,7 @@ mpv is the better choice for HDR and needs no installation: an extracted portabl
 
 ### Windows
 
-**Just want to use it?** Grab a release — no Node, no build, nothing installed:
-
-| Artifact | What it is |
-| --- | --- |
-| `Lunaria-<version>-portable.exe` | One file. Double-click and it runs. |
-| `Lunaria-<version>-win.zip` | Unzip anywhere. Drop a portable mpv folder beside `Lunaria.exe` and it is found automatically. |
+**Just want to use it?** Grab `Lunaria-<version>-win.zip` from a release — no Node, no build, nothing installed. Unzip it anywhere and run `Lunaria.exe`; drop a portable mpv folder beside it and it is found automatically.
 
 The build is **unsigned**, so Windows SmartScreen warns on first run — *More info → Run anyway*.
 Removing that warning needs a code-signing certificate, which this project does not have.
@@ -60,7 +55,7 @@ setup.bat    :: one time — checks Node, installs everything, builds the
 run.bat      :: start Lunaria
 debug.bat    :: start with the console visible and engine logging on
 dev.bat      :: start with hot reload (Vite dev server + Electron)
-dist.bat     :: build the portable release into release\
+dist.bat     :: build the release: release\win-unpacked\ and a zip of it
 ```
 
 `setup.bat` refuses to continue on Node older than 22 and warns if neither player is present, since Lunaria decodes nothing itself. mpv is located through Lunaria's own discovery, so an extracted portable folder is found without being installed.

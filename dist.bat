@@ -1,12 +1,11 @@
 @echo off
-REM Lunaria - build the portable release.
+REM Lunaria - build the release.
 REM
-REM Produces two artifacts in release\:
-REM   Lunaria-<version>-portable.exe   one file, double-click, nothing installed
-REM   Lunaria-<version>-win-x64.zip    unzip anywhere; drop an mpv folder beside it
+REM Produces, in release\:
+REM   win-unpacked\                the app folder that ships: Lunaria.exe and everything beside it
+REM   Lunaria-<version>-win.zip    that same folder zipped; unzip anywhere, drop an mpv folder beside it
 REM
-REM Both keep their data in LunariaData\ next to the exe rather than in
-REM %APPDATA%, so the folder carries the whole install.
+REM Settings and profiles live in %APPDATA%\Lunaria, not in the app folder.
 setlocal
 cd /d "%~dp0"
 
@@ -29,9 +28,9 @@ call npm run dist || goto :failed
 
 echo.
 echo ============================================================
-echo   Done. Artifacts are in release\
+echo   Done. Ship release\win-unpacked\ - also zipped as:
 echo.
-dir /b "release\*.exe" "release\*.zip" 2>nul
+dir /b "release\*.zip" 2>nul
 echo.
 echo   The build is unsigned, so Windows SmartScreen will warn on
 echo   first run - More info then Run anyway.
