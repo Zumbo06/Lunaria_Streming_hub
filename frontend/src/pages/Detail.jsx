@@ -9,6 +9,7 @@ import {
   nextRequestId, playApi, playersApi, progressApi, streamsApi, subtitlesApi, trailerUrlOf, videoIdOf, watchlistApi,
 } from '../api/orion.js'
 import { usePlayer } from '../components/PlayerProvider.jsx'
+import Backdrop from '../components/Backdrop.jsx'
 import EpisodeList from '../components/EpisodeList.jsx'
 import StreamList from '../components/StreamList.jsx'
 import Badge from '../components/Badge.jsx'
@@ -612,14 +613,7 @@ export default function Detail() {
       {/* Backdrop */}
       <div className="relative">
         <div className="absolute inset-x-0 top-0 h-[560px] overflow-hidden">
-          {meta.background && (
-            <img
-              src={meta.background}
-              alt=""
-              decoding="async"
-              className="h-full w-full object-cover object-top opacity-80"
-            />
-          )}
+          <Backdrop src={meta.background} eager className="opacity-90" />
           {/* Bounded scrims, as on the Home showcase: the text column gets a
               solid base and the artwork on the right is left mostly alone. */}
           <div className="absolute inset-0 bg-gradient-to-r from-ink-950 via-ink-950/75 via-45% to-ink-950/20" />

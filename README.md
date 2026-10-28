@@ -186,7 +186,7 @@ Settings live in `config.json` under the Electron user-data directory; the addon
 | `networkCaching` | `3000` | **VLC only** — see [Players](#players) |
 | `enginePort` | `8080` | First port tried; probes upward if taken |
 | `downloadDir` | temp | Where pieces land |
-| `keepDownloads` | `false` | Survive teardown instead of being wiped |
+| `keepDownloads` | `false` | Survive teardown instead of being wiped — once the player has started reading it; a stream that fails or is closed before playback keeps nothing |
 | `headBufferBytes` | 4 MB | Rounded up to whole pieces |
 | `tailBufferBytes` | 8 MB | Rounded up to whole pieces |
 | `readaheadBytes` | 24 MB | Raised to two pieces when they are larger |

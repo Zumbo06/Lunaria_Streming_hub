@@ -866,8 +866,8 @@ export default function SettingsPage() {
           label="Keep downloaded files"
           hint={
             settings.keepDownloads
-              ? 'On: the rest of the file is fetched at low priority behind playback so what you keep is complete and playable, and it survives Stop.'
-              : 'Off: Lunaria streams only the sliding window and deletes everything the moment the stream stops.'
+              ? 'On: the rest of the file is fetched at low priority behind playback so what you keep is complete and playable, and it survives Stop. A stream that fails or is closed before it starts playing keeps nothing.'
+              : 'Off: Lunaria streams only the sliding window and deletes everything the moment the stream stops — or at the next launch, if the app was closed abruptly.'
           }
         >
           <button

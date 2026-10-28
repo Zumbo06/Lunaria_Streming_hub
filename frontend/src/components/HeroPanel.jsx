@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { Bookmark, BookmarkCheck, ChevronLeft, ChevronRight, Play, Star } from 'lucide-react'
 import { watchlistApi } from '../api/orion.js'
+import Backdrop from './Backdrop.jsx'
 
 const ADVANCE_MS = 7000
 // After a manual click, hold off the timer so the slide does not slide out from
@@ -107,7 +108,7 @@ export default function HeroPanel({ items = [] }) {
       />
 
       <section
-        className="relative h-[340px] overflow-hidden rounded-2xl bg-ink-900 shadow-2xl ring-1 ring-white/10 sm:h-[400px]"
+        className="relative h-[clamp(360px,30vw,520px)] overflow-hidden rounded-2xl bg-ink-900 shadow-2xl ring-1 ring-white/10"
         onMouseEnter={() => setPaused(true)}
         onMouseLeave={() => setPaused(false)}
         // Keyboard users get the same courtesy as the mouse: no slide change
@@ -129,18 +130,12 @@ export default function HeroPanel({ items = [] }) {
             position === index ? 'opacity-100' : 'opacity-0'
           }`}
         >
-          <img
-            src={entry.background || entry.poster}
-            alt=""
-            loading={position === 0 ? 'eager' : 'lazy'}
-            decoding="async"
-            className="h-full w-full object-cover object-top"
-          />
-          {/* Scrims are bounded rather than full-coverage: the left one clears
-              well before the right edge and the bottom one only covers the
-              text. Legibility comes from the drop shadows below, so the
-              artwork itself is left alone. */}
-          <div className="absolute inset-0 bg-gradient-to-r from-ink-950 via-ink-950/45 via-40% to-transparent to-72%" />
+          <Backdrop src={entry.background || entry.poster} eager={position === 0} />
+          {/* Scrims are bounded rather than full-coverage: the left one darkens
+              the blurred fill behind the text and clears before the artwork
+              does, and the bottom one only covers the text. Legibility comes
+              from the drop shadows below, so the artwork itself is left alone. */}
+          <div className="absolute inset-0 bg-gradient-to-r from-ink-950/90 via-ink-950/50 via-35% to-transparent to-60%" />
           <div className="absolute inset-x-0 bottom-0 h-2/5 bg-gradient-to-t from-ink-950/85 to-transparent" />
         </div>
       ))}
@@ -253,5 +248,5 @@ export default function HeroPanel({ items = [] }) {
 }
 
 export function HeroSkeleton() {
-  return <div className="skeleton mb-8 h-[340px] w-full rounded-2xl sm:h-[400px]" />
+  return <div className="skeleton mb-8 h-[clamp(360px,30vw,520px)] w-full rounded-2xl" />
 }

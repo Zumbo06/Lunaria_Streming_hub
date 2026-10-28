@@ -11,8 +11,8 @@
 // window selected at any moment.
 //
 // Protocol with the parent, over process.send/message:
-//   in  { cmd: 'start', magnetUri, infoHash, fileIdx, port, downloadDir, ... }
-//   in  { cmd: 'stop' } | { cmd: 'shutdown' }
+//   in  { cmd: 'start', magnetUri, infoHash, fileIdx, port, downloadDir, journalDir, ... }
+//   in  { cmd: 'stop', quiet? } | { cmd: 'shutdown' }
 //   out { type: 'metadata' | 'buffering' | 'ready' | 'progress' | 'stopped' | 'error' }
 
 import crypto from 'node:crypto'
@@ -24,6 +24,7 @@ import path from 'node:path'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import WebTorrent from 'webtorrent'
+import leftovers from './leftovers.js'
 
 const DEBUG = Boolean(process.env.ORION_DEBUG)
 
@@ -75,13 +76,31 @@ let readaheadBytes = 24 * 1024 * 1024
 // When set, the finished file survives `stop` instead of being wiped.
 let keepFiles = false
 
+// Set once the player has started reading this stream. Until then nothing of it
+// has been watched, so nothing is kept even when downloads are.
+let delivered = false
+
+// This stream's record in the crash journal: what it has written and whether
+// any of it may be kept. See leftovers.js.
+let journalDir = null
+let record = null
+let recordPath = null
+
 // Per-stream secret in the URL path. Without it the loopback port is readable
 // by any other local process or web page for as long as a stream is running.
 // Rotated on every `start`, so a URL from a previous stream stops working.
 let sessionToken = null
 
 function send(message) {
-  if (process.send) process.send(message)
+  // Once the parent has gone, `process.send` raises an 'error' on `process`
+  // that nothing handles, and an engine that dies mid-teardown leaves the
+  // stream's files behind.
+  if (!process.send || !process.connected) return
+  try {
+    process.send(message)
+  } catch {
+    /* channel closing */
+  }
 }
 
 function debug(...args) {
@@ -297,6 +316,9 @@ function handleRequest(req, res) {
 
   const start = range ? range.start : 0
   const end = range ? range.end : size - 1
+
+  // The player is reading the stream, so from here on it counts as watched.
+  markDelivered()
 
   res.writeHead(range ? 206 : 200, {
     'Content-Length': end - start + 1,
@@ -540,56 +562,135 @@ function startProgress(torrent, file) {
   }, 1000)
 }
 
-// ---- Lifecycle ----
+// ---- Crash journal ----
 
-function cleanupTempDir() {
-  const removable = tempDir && ownsTempDir && !keepFiles
-  if (removable) {
+// fs-chunk-store drops these characters from file names when it writes them.
+const RESERVED_FILENAME = /[<>:"/\\|?*\u0000-\u001F]/g
+
+/** Where fs-chunk-store puts one of a torrent's files on disk. */
+function storePathOf(torrent, file) {
+  return path.join(
+    path.resolve(torrent.path, path.dirname(file.path)),
+    path.basename(file.path).replace(RESERVED_FILENAME, ''),
+  )
+}
+
+function saveRecord(patch) {
+  if (!record) return
+  Object.assign(record, patch)
+  if (!recordPath) return
+  try {
+    fs.writeFileSync(recordPath, JSON.stringify(record))
+  } catch {
+    /* the journal is a safety net; a stream never fails over it */
+  }
+}
+
+function openRecord(fields) {
+  record = { pid: process.pid, ...fields, delivered: false, files: [], dirs: [] }
+  recordPath = null
+
+  if (journalDir) {
     try {
-      fs.rmSync(tempDir, { recursive: true, force: true })
-    } catch (err) {
-      console.error('[engine] Could not remove temp dir:', err.message)
+      fs.mkdirSync(journalDir, { recursive: true })
+      recordPath = path.join(
+        journalDir,
+        `${process.pid}-${crypto.randomBytes(6).toString('hex')}${leftovers.RECORD_EXTENSION}`,
+      )
+    } catch {
+      recordPath = null
     }
   }
-  tempDir = null
-  ownsTempDir = false
+  saveRecord({})
 }
+
+/**
+ * Runs on the torrent's `metadata` event, which WebTorrent emits before it looks
+ * for existing data — so before this stream has created a single file. Whatever
+ * exists at this point was there already (an earlier download of the same
+ * release) and is never deleted on this stream's account.
+ */
+function recordFiles(torrent) {
+  if (!record || record.ownsDir || torrent !== activeTorrent) return
+
+  const root = path.resolve(record.dir)
+  const files = torrent.files.map((file) => {
+    const target = storePathOf(torrent, file)
+    return { path: target, preexisting: fs.existsSync(target) }
+  })
+
+  // Folders this stream is about to create, so they can go with it once empty.
+  const dirs = new Set()
+  for (const file of files) {
+    let dir = path.dirname(file.path)
+    while (dir.startsWith(root + path.sep) && !fs.existsSync(dir)) {
+      dirs.add(dir)
+      dir = path.dirname(dir)
+    }
+  }
+
+  saveRecord({ files, dirs: [...dirs] })
+}
+
+function markDelivered() {
+  if (delivered) return
+  delivered = true
+  saveRecord({ delivered: true })
+}
+
+// ---- Lifecycle ----
 
 function stopNow() {
   clearInterval(progressTimer)
   progressTimer = null
 
   const torrent = activeTorrent
-  const keeping = keepFiles
-  const keptPath = keeping && activeFile && tempDir ? path.join(tempDir, activeFile.path) : null
-  const completed = keeping && activeFile ? activeFile.progress >= 1 : false
+  const finished = record
+  const finishedPath = recordPath
+  // Only a download the player actually read is kept. One that failed or was
+  // closed before playback started is discarded even when downloads are kept.
+  const keptPath = keepFiles && delivered && activeFile && tempDir ? path.join(tempDir, activeFile.path) : null
+  const completed = keptPath ? activeFile.progress >= 1 : false
 
   activeTorrent = null
   activeFile = null
   // Retire the URL along with the stream.
   sessionToken = null
+  record = null
+  recordPath = null
+  delivered = false
+
+  const finish = () => {
+    // A record that could not be fully discarded (a file still locked) stays in
+    // the journal, and the next launch tries again.
+    if (leftovers.discard(finished) && finishedPath) {
+      try {
+        fs.rmSync(finishedPath, { force: true })
+      } catch {
+        /* swept at the next launch */
+      }
+    }
+    tempDir = null
+    ownsTempDir = false
+    return keptPath ? { path: keptPath, complete: completed } : null
+  }
 
   // WebTorrent's `_destroy` returns early on an already-destroyed torrent
   // *without* invoking the callback, so waiting on one would never resolve —
   // and since teardown is chained below, that would wedge every later stop and
   // start behind it.
-  if (!torrent || torrent.destroyed) {
-    cleanupTempDir()
-    return Promise.resolve(torrent && keptPath ? { path: keptPath, complete: completed } : null)
-  }
+  if (!torrent || torrent.destroyed) return Promise.resolve(finish())
 
   return new Promise((resolve) => {
-    // destroyStore deletes the media off disk. It is skipped only when the user
-    // asked to keep downloads; otherwise every byte goes when the stream does.
-    torrent.destroy({ destroyStore: !keeping }, () => {
-      cleanupTempDir()
-      resolve(keptPath ? { path: keptPath, complete: completed } : null)
-    })
+    // Only closes the store. What gets deleted is the record's call: it knows
+    // which files this stream created and which were already on disk, which
+    // WebTorrent's all-or-nothing `destroyStore` does not.
+    torrent.destroy({ destroyStore: false }, () => resolve(finish()))
   })
 }
 
-// Teardowns are chained rather than allowed to overlap a startup. `destroyStore`
-// on an abandoned 4K partial deletes gigabytes, and with a configured
+// Teardowns are chained rather than allowed to overlap a startup. Discarding
+// an abandoned 4K partial deletes gigabytes, and with a configured
 // `downloadDir` that happens in the very folder the next episode is about to
 // write into. Auto-advance sends `start` about ten seconds after `stop`, so
 // without this the opening pieces of the next episode compete with that delete
@@ -628,25 +729,18 @@ function stop() {
 
 /**
  * Unwinds a `start` that was cancelled after it had already created a swarm.
- * The stop that cancelled it may have run before `activeTorrent` was assigned,
- * leaving an orphan nobody else will clean up; anything that has *replaced* this
- * attempt is left strictly alone.
+ * Anything that has *replaced* this attempt is left strictly alone.
  */
 function abandon(torrent) {
-  if (!torrent) return
-
-  if (activeTorrent === torrent) {
-    // Only ours to clear. If something has already replaced this attempt, the
-    // timer and the token belong to that stream.
-    clearInterval(progressTimer)
-    progressTimer = null
-    activeTorrent = null
-    activeFile = null
-    sessionToken = null
-  }
+  // Still the active torrent: the stop that cancelled this attempt is queued
+  // behind the teardown chain and will destroy it and discard its files in
+  // order. Destroying it here as well would race that discard against the store
+  // still closing.
+  if (!torrent || torrent === activeTorrent) return
 
   try {
-    if (!torrent.destroyed) torrent.destroy({ destroyStore: !keepFiles })
+    // Files are the record's business (see `stopNow`), so the store is only closed.
+    if (!torrent.destroyed) torrent.destroy({ destroyStore: false })
   } catch {
     /* already gone */
   }
@@ -664,6 +758,7 @@ async function start(payload) {
     keepDownloads = false,
     metadataTimeoutMs = 60000,
     bufferTimeoutMs = 120000,
+    journalDir: journal = null,
   } = payload
 
   // One torrent at a time: a previous swarm is torn down before a new one
@@ -679,10 +774,14 @@ async function start(payload) {
 
   readaheadBytes = requestedReadahead
   keepFiles = Boolean(keepDownloads)
+  journalDir = journal
 
   tempDir = downloadDir || fs.mkdtempSync(path.join(os.tmpdir(), 'orion-'))
   ownsTempDir = !downloadDir
   if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true })
+
+  // Before the first byte is written, so a crash from here on is recoverable.
+  openRecord({ dir: tempDir, ownsDir: ownsTempDir, keep: keepFiles })
 
   // `deselect: true` suppresses WebTorrent's default "select the whole torrent"
   // on ready. Without it every piece is queued the moment metadata lands and
@@ -693,6 +792,7 @@ async function start(payload) {
     deselect: true,
   })
   activeTorrent = torrent
+  torrent.once('metadata', () => recordFiles(torrent))
 
   torrent.on('error', (err) => {
     send({ type: 'error', message: `Torrent error: ${err?.message || err}` })
@@ -819,7 +919,9 @@ process.on('message', async (message) => {
         break
       case 'stop': {
         const kept = await stop()
-        send({ type: 'stopped', kept })
+        // A quiet stop is the parent tidying up after a failure it has already
+        // reported; it is not news to the interface.
+        send({ type: 'stopped', kept, quiet: Boolean(message.quiet) })
         break
       }
       case 'shutdown':

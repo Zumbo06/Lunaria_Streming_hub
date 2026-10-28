@@ -13,6 +13,7 @@ const subtitlesLib = require('./subtitles')
 const players = require('./players')
 const vlc = require('./vlc')
 const transfer = require('./transfer')
+const leftovers = require('./engine/leftovers')
 
 const isDev = process.env.ELECTRON_START_URL != null
 
@@ -262,6 +263,8 @@ function onEngineMessage(message) {
       break
     case 'stopped':
       engineState = { running: false, infoHash: null, url: null, name: null }
+      // The tidy-up after a failure the interface has already been told about.
+      if (message.quiet) return
       break
     default:
       break
@@ -289,6 +292,9 @@ function ensureEngine() {
     engineState = { running: false, infoHash: null, url: null, name: null }
     settleStart(null, new Error(`Engine process exited (code ${code}, signal ${signal})`))
     broadcast('engine:event', { type: 'engine-offline', code, signal })
+    // An engine that crashed left its stream's files where they were, and
+    // nothing else would clear them before the next launch.
+    sweepEngineLeftovers()
   })
 
   return engineProcess
@@ -304,12 +310,30 @@ function resolveDownloadDir(settings) {
   return null
 }
 
+/** Where each stream's engine keeps its crash record (see engine/leftovers.js). */
+function engineJournalDir() {
+  return path.join(app.getPath('userData'), 'engine-sessions')
+}
+
 /**
- * Removes `orion-*` scratch folders left behind by a crash or a force-quit.
- * Anything touched in the last five minutes is skipped so a second instance's
- * live stream is never pulled out from under it.
+ * Finishes the teardown of streams that never got to clean up after
+ * themselves: the app crashed, was ended from Task Manager, or the machine lost
+ * power part-way through a stream. Each stream's engine keeps a record of what
+ * it wrote, and one whose engine is no longer running is discarded by the same
+ * rules as a normal stop — in a chosen download folder as well as in temp.
  */
-function sweepStaleTempDirs() {
+function sweepEngineLeftovers() {
+  sweepStaleTempDirs(leftovers.sweep(engineJournalDir()))
+}
+
+/**
+ * Removes `orion-*` scratch folders that no journal record accounts for: left
+ * by a build that predates the journal, or by an engine that died before it
+ * could write one. Folders a running engine is using are skipped, and so is
+ * anything touched in the last five minutes, in case it belongs to another
+ * instance running an older build.
+ */
+function sweepStaleTempDirs(inUse = new Set()) {
   const tmp = os.tmpdir()
   const cutoff = Date.now() - 5 * 60 * 1000
 
@@ -323,6 +347,7 @@ function sweepStaleTempDirs() {
   for (const entry of entries) {
     if (!entry.isDirectory() || !entry.name.startsWith('orion-')) continue
     const target = path.join(tmp, entry.name)
+    if (inUse.has(path.resolve(target))) continue
     try {
       if (fs.statSync(target).mtimeMs > cutoff) continue
       fs.rmSync(target, { recursive: true, force: true })
@@ -367,11 +392,12 @@ function engineStart(stream, settings) {
       readaheadBytes: settings.readaheadBytes,
       keepDownloads: settings.keepDownloads,
       bufferTimeoutMs: settings.bufferTimeoutMs,
+      journalDir: engineJournalDir(),
     })
   })
 }
 
-function engineStop() {
+function engineStop({ quiet = false } = {}) {
   // A stop that lands mid-connect has to settle the in-flight start as well.
   // The engine answers a cancelled attempt with silence — no `ready`, no
   // `error` — so without this the play request stays pending behind its guard
@@ -379,7 +405,7 @@ function engineStop() {
   // request that still believes it owns the engine.
   settleStart(null, Object.assign(new Error('Stopped before playback started'), { cancelled: true }))
 
-  if (engineProcess && engineProcess.connected) engineProcess.send({ cmd: 'stop' })
+  if (engineProcess && engineProcess.connected) engineProcess.send({ cmd: 'stop', quiet })
   engineState = { running: false, infoHash: null, url: null, name: null }
 }
 
@@ -1124,10 +1150,15 @@ ipcMain.handle('subtitles:get', (event, { type, id, extra }) => collectSubtitles
  * tracking. Shared by the play IPC and by auto-advance so the two can never
  * drift apart.
  */
+// Which play request currently owns the engine, so a failing one never stops
+// the stream that has replaced it.
+let playAttempt = 0
+
 async function startPlayback({ stream, item, subtitle, playerOverride } = {}) {
   // Choosing something to watch overrules a queued next episode, which would
   // otherwise take the player over part-way through.
   cancelAutoAdvance('superseded')
+  const attempt = ++playAttempt
 
   const settings = config.getSettings()
   const playerId = playerOverride || players.resolveId(settings)
@@ -1229,6 +1260,12 @@ async function startPlayback({ stream, item, subtitle, playerOverride } = {}) {
       broadcast('play:status', { phase: 'cancelled', stream: stream.filename })
       return { ok: false, code: 'CANCELLED', error: err.message }
     }
+
+    // A start that failed before the player got going — the engine gave up or
+    // went silent, or the player would not launch — must not leave the swarm
+    // running and writing behind the error. Quiet, because the failure itself
+    // is what the interface reports.
+    if (stream.kind === 'p2p' && attempt === playAttempt) engineStop({ quiet: true })
 
     broadcast('play:status', { phase: 'failed', stream: stream.filename, error: err.message })
     return { ok: false, code: 'PLAY_FAILED', error: err.message }
@@ -1886,7 +1923,7 @@ app.whenReady().then(() => {
   transfer.adoptIfFresh()
 
   createWindow()
-  sweepStaleTempDirs()
+  sweepEngineLeftovers()
   hydrateAddons().catch((err) => console.error('[main] Addon hydration failed:', err.message))
 
   app.on('activate', () => {
