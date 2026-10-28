@@ -1279,9 +1279,11 @@ async function nextEpisodeFor(item) {
     videoId: video.id,
     name: meta.name || item.name || '',
     poster: meta.poster || item.poster || null,
+    background: meta.background || item.background || null,
     season: video.season,
     episode: video.episode,
     episodeTitle: video.title || video.name || '',
+    thumbnail: video.thumbnail || null,
   }
 }
 
@@ -1391,17 +1393,20 @@ async function scheduleAutoAdvance(item, last) {
 
   preStagedNext = null
 
+  async function start() {
+    autoAdvance = null
+    announceAutoAdvance('starting', { next })
+
+    const result = await startPlayback({ stream, item: next, subtitle })
+    if (!result.ok && result.code !== 'CANCELLED') {
+      announceAutoAdvance('failed', { next, error: result.error })
+    }
+  }
+
   autoAdvance = {
     next,
-    timer: setTimeout(async () => {
-      autoAdvance = null
-      announceAutoAdvance('starting', { next })
-
-      const result = await startPlayback({ stream, item: next, subtitle })
-      if (!result.ok && result.code !== 'CANCELLED') {
-        announceAutoAdvance('failed', { next, error: result.error })
-      }
-    }, AUTO_ADVANCE_DELAY_MS),
+    start,
+    timer: setTimeout(start, AUTO_ADVANCE_DELAY_MS),
   }
 
   announceAutoAdvance('scheduled', {
@@ -1417,6 +1422,16 @@ async function scheduleAutoAdvance(item, last) {
 }
 
 ipcMain.handle('play:cancelAutoAdvance', () => ({ cancelled: cancelAutoAdvance('user') }))
+
+// Skips the rest of the countdown — someone who is already waiting at the
+// screen should not have to sit through it.
+ipcMain.handle('play:advanceNow', () => {
+  if (!autoAdvance) return { started: false }
+
+  clearTimeout(autoAdvance.timer)
+  autoAdvance.start()
+  return { started: true }
+})
 
 /**
  * Plays an episode nobody has picked a release for yet — an "up next" card.
@@ -1656,7 +1671,20 @@ ipcMain.handle('progress:upNext', async (event, limit) => {
       .filter((entry) => !resuming.has(`${entry.type}:${entry.id}`))
       .map(async (entry) => {
         try {
-          const next = await nextEpisodeFor(entry)
+          let previous = entry
+          let next = await nextEpisodeFor(entry)
+
+          // A special watched in between leads nowhere in the main run, so
+          // carry on from the newest finished numbered episode instead.
+          if (!next && Number(entry.season) === 0) {
+            const anchor = Object.values(library.getSeriesProgress(profileId, entry.type, entry.id))
+              .filter((row) => row.finished && Number(row.season) !== 0)
+              .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))[0]
+            if (anchor) {
+              previous = anchor
+              next = await nextEpisodeFor(anchor)
+            }
+          }
           if (!next) return null
 
           // Deliberately *not* `source`: that release is the previous episode's
@@ -1664,9 +1692,10 @@ ipcMain.handle('progress:upNext', async (event, limit) => {
           // matching the same release group when this card is played.
           return {
             ...next,
-            previousSource: entry.source || null,
-            previousSubtitle: entry.subtitle || null,
+            previousSource: previous.source || null,
+            previousSubtitle: previous.subtitle || null,
             upNext: true,
+            // The special still counts as the latest activity for ordering the row.
             updatedAt: entry.updatedAt,
           }
         } catch {
@@ -1681,6 +1710,11 @@ ipcMain.handle('progress:upNext', async (event, limit) => {
 ipcMain.handle('progress:get', (event, { type, videoId }) =>
   library.getProgress(activeProfileId(), type, videoId),
 )
+
+ipcMain.handle('progress:series', (event, { type, id }) => {
+  const profileId = activeProfileId()
+  return profileId ? library.getSeriesProgress(profileId, type, id) : {}
+})
 
 /**
  * Removes a title from Continue watching. For a series that means the whole

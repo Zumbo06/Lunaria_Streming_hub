@@ -104,7 +104,7 @@ export default function Shelf({ shelf }) {
           type="button"
           aria-label="Scroll left"
           onClick={() => scrollBy(-1)}
-          className="focus-ring absolute -left-3 top-1/2 z-10 hidden -translate-y-1/2 rounded-full bg-ink-800/90 p-2 text-slate-300 ring-1 ring-white/10 backdrop-blur transition hover:bg-ink-700 hover:text-white group-hover/shelf:block"
+          className="focus-ring absolute left-0 top-1/2 z-10 hidden -translate-y-1/2 rounded-full bg-ink-800/90 p-2 text-slate-300 ring-1 ring-white/10 backdrop-blur transition hover:bg-ink-700 hover:text-white group-hover/shelf:block"
         >
           <ChevronLeft size={18} />
         </button>
@@ -112,12 +112,17 @@ export default function Shelf({ shelf }) {
           type="button"
           aria-label="Scroll right"
           onClick={() => scrollBy(1)}
-          className="focus-ring absolute -right-3 top-1/2 z-10 hidden -translate-y-1/2 rounded-full bg-ink-800/90 p-2 text-slate-300 ring-1 ring-white/10 backdrop-blur transition hover:bg-ink-700 hover:text-white group-hover/shelf:block"
+          className="focus-ring absolute right-0 top-1/2 z-10 hidden -translate-y-1/2 rounded-full bg-ink-800/90 p-2 text-slate-300 ring-1 ring-white/10 backdrop-blur transition hover:bg-ink-700 hover:text-white group-hover/shelf:block"
         >
           <ChevronRight size={18} />
         </button>
 
-        <div ref={railRef} onScroll={onScroll} className="no-scrollbar flex gap-4 overflow-x-auto scroll-smooth pb-2">
+        {/* Padded out and pulled back so the hover glow is not clipped by the scroller. */}
+        <div
+          ref={railRef}
+          onScroll={onScroll}
+          className="no-scrollbar -mx-3 -my-3 flex gap-4 overflow-x-auto scroll-smooth px-3 py-3"
+        >
           {loading
             ? Array.from({ length: 8 }, (_, index) => <PosterSkeleton key={index} />)
             : metas.map((meta) => <PosterCard key={`${meta.id}-${meta.name}`} meta={meta} />)}

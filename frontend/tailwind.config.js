@@ -27,7 +27,9 @@ export default {
       },
       boxShadow: {
         poster: '0 12px 32px -12px rgba(0, 0, 0, 0.85)',
-        lift: '0 0 0 1px rgba(111, 141, 255, 0.45), 0 16px 40px -16px rgba(111, 141, 255, 0.55)',
+        // Accent shadows go through the variable too, so each theme's accent applies.
+        lift: '0 0 0 1px rgb(var(--accent) / 0.45), 0 16px 40px -16px rgb(var(--accent) / 0.55)',
+        glow: '0 0 6px rgb(var(--accent) / 0.7)',
       },
       keyframes: {
         shimmer: {

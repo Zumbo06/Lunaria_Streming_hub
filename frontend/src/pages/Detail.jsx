@@ -1,23 +1,28 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useLocation, useNavigate, useParams } from 'react-router-dom'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import {
-  AlertTriangle, ArrowLeft, Bookmark, BookmarkCheck, Captions, Clock, Film, History, Loader2, MonitorPlay,
-  Star, Tv, X,
+  AlertTriangle, ArrowLeft, Bookmark, BookmarkCheck, CalendarClock, Captions, Clapperboard, Film, History, Loader2,
+  MonitorPlay, Play, RotateCcw, Star, Tv, X,
 } from 'lucide-react'
-import { Link } from 'react-router-dom'
 import {
-  formatRuntime, metaApi, nextRequestId, playersApi, streamsApi, subtitlesApi, watchlistApi,
+  appApi, creditsOf, formatAirDate, formatRemaining, formatRuntime, isReleased, metaApi, nextEpisodeAfter,
+  nextRequestId, playApi, playersApi, progressApi, streamsApi, subtitlesApi, trailerUrlOf, videoIdOf, watchlistApi,
 } from '../api/orion.js'
 import { usePlayer } from '../components/PlayerProvider.jsx'
+import EpisodeList from '../components/EpisodeList.jsx'
 import StreamList from '../components/StreamList.jsx'
 import Badge from '../components/Badge.jsx'
 
-/** Looks up the episode number for the currently selected episode id. */
-function episodeNumberFor(seasons, selectedSeason, episodeId) {
-  if (!episodeId) return null
-  const season = seasons.find((entry) => entry.season === selectedSeason)
-  const video = season?.videos.find((item) => (item.id || '') === episodeId)
-  return video?.episode ?? null
+// Matches STARTED_AT in electron/library.js: below this a title was opened, not watched.
+const STARTED_AT = 0.01
+
+// Longer descriptions are clamped behind a "More" toggle.
+const LONG_DESCRIPTION = 280
+
+const TYPE_LABELS = { movie: 'Movie', series: 'Series' }
+
+function episodeLabel(season, episode) {
+  return season != null && episode != null ? `S${season}:E${episode}` : null
 }
 
 /**
@@ -29,13 +34,14 @@ export default function Detail() {
   const { type, id } = useParams()
   const navigate = useNavigate()
   const location = useLocation()
-  const { play, busyStreamId, engine, applySubtitleNow } = usePlayer()
+  const { play, resumeEntry, busyStreamId, engine, applySubtitleNow } = usePlayer()
 
   const decodedId = decodeURIComponent(id)
 
   // Set when Continue watching sends someone here: which episode they were on,
-  // which release they used, and why it could not simply be resumed.
-  const { episodeId: requestedEpisodeId, highlightSourceId, resumeFailed } = location.state || {}
+  // which release they used, and why it could not simply be resumed. Home's
+  // showcase sets `focusStreams` so "Watch" lands on the sources.
+  const { episodeId: requestedEpisodeId, highlightSourceId, resumeFailed, focusStreams } = location.state || {}
   const [resumeNotice, setResumeNotice] = useState(null)
 
   useEffect(() => {
@@ -45,6 +51,8 @@ export default function Detail() {
   const [meta, setMeta] = useState(null)
   const [metaError, setMetaError] = useState(null)
   const [loadingMeta, setLoadingMeta] = useState(true)
+  const [logoFailed, setLogoFailed] = useState(false)
+  const [expanded, setExpanded] = useState(false)
 
   const [selectedSeason, setSelectedSeason] = useState(null)
   const [episodeId, setEpisodeId] = useState(null)
@@ -60,6 +68,14 @@ export default function Detail() {
   const [subtitleId, setSubtitleId] = useState('')
   const streamRequest = useRef(null)
 
+  const [progress, setProgress] = useState({})
+  const [progressLoaded, setProgressLoaded] = useState(false)
+  const [starting, setStarting] = useState(false)
+  const [streamsFocus, setStreamsFocus] = useState(0)
+  const progressRequest = useRef(0)
+  const streamsRef = useRef(null)
+  const focusHandled = useRef(null)
+
   const isSeries = type === 'series'
   const streamTargetId = isSeries ? episodeId : decodedId
 
@@ -70,6 +86,8 @@ export default function Detail() {
     setLoadingMeta(true)
     setMeta(null)
     setMetaError(null)
+    setLogoFailed(false)
+    setExpanded(false)
     setEpisodeId(null)
     setSelectedSeason(null)
 
@@ -104,6 +122,28 @@ export default function Detail() {
       .sort((a, b) => (a.season === 0) - (b.season === 0) || a.season - b.season)
   }, [meta])
 
+  const findEpisode = useCallback(
+    (videoId) => {
+      for (const entry of seasons) {
+        const video = entry.videos.find((item) => videoIdOf(item, decodedId) === videoId)
+        if (video) return { season: entry.season, video }
+      }
+      return null
+    },
+    [seasons, decodedId],
+  )
+
+  const selectEpisode = useCallback(
+    (videoId) => {
+      const found = findEpisode(videoId)
+      if (!found) return false
+      setSelectedSeason(found.season)
+      setEpisodeId(videoId)
+      return true
+    },
+    [findEpisode],
+  )
+
   useEffect(() => {
     if (seasons.length > 0 && selectedSeason === null) setSelectedSeason(seasons[0].season)
   }, [seasons, selectedSeason])
@@ -111,18 +151,135 @@ export default function Detail() {
   // Arriving from Continue watching: open on the episode that was being
   // watched instead of the first one of season one.
   useEffect(() => {
-    if (!requestedEpisodeId || seasons.length === 0) return
+    if (requestedEpisodeId) selectEpisode(requestedEpisodeId)
+  }, [requestedEpisodeId, selectEpisode])
 
-    const owner = seasons.find((entry) =>
-      entry.videos.some(
-        (video) => (video.id || `${decodedId}:${video.season}:${video.episode}`) === requestedEpisodeId,
-      ),
+  // ---- Progress ----
+
+  const loadProgress = useCallback(async () => {
+    const token = ++progressRequest.current
+    let next = {}
+
+    try {
+      if (isSeries) {
+        next = (await progressApi.series(type, decodedId)) || {}
+      } else {
+        const entry = await progressApi.get(type, decodedId)
+        if (entry) next = { [decodedId]: entry }
+      }
+    } catch {
+      next = {}
+    }
+
+    if (token !== progressRequest.current) return
+    setProgress(next)
+    setProgressLoaded(true)
+  }, [isSeries, type, decodedId])
+
+  useEffect(() => {
+    setProgress({})
+    setProgressLoaded(false)
+    loadProgress()
+    // A position is committed when the player closes, so refresh on that.
+    return playApi.onEnded(loadProgress)
+  }, [loadProgress])
+
+  /**
+   * What the main button does, worked out from where this profile is:
+   * carry on with the release they were using, start the episode after the
+   * one they finished, or point at the sources when there is nothing to
+   * resume. Films never auto-pick a release for a first watch.
+   */
+  const primary = useMemo(() => {
+    if (!meta) return null
+
+    if (!isSeries) {
+      const entry = progress[decodedId]
+      if (entry && !entry.finished && entry.percent >= STARTED_AT) {
+        return {
+          kind: entry.source ? 'resume' : 'streams',
+          entry,
+          label: 'Resume',
+          detail: formatRemaining(entry.positionSeconds, entry.durationSeconds),
+        }
+      }
+      return entry?.finished
+        ? { kind: 'streams', label: 'Watch again', again: true }
+        : { kind: 'streams', label: 'Play' }
+    }
+
+    if (seasons.length === 0) return null
+
+    const latest = Object.values(progress).reduce(
+      (newest, entry) => (!newest || (entry.updatedAt || 0) > (newest.updatedAt || 0) ? entry : newest),
+      null,
     )
-    if (!owner) return
 
-    setSelectedSeason(owner.season)
-    setEpisodeId(requestedEpisodeId)
-  }, [requestedEpisodeId, seasons, decodedId])
+    if (latest && !latest.finished) {
+      const label = episodeLabel(latest.season, latest.episode)
+      if (latest.percent >= STARTED_AT) {
+        return {
+          kind: latest.source ? 'resume' : 'select',
+          entry: latest,
+          videoId: latest.videoId,
+          label: label ? `Resume ${label}` : 'Resume',
+          detail: formatRemaining(latest.positionSeconds, latest.durationSeconds),
+        }
+      }
+      if (findEpisode(latest.videoId)) {
+        return { kind: 'select', videoId: latest.videoId, label: label ? `Play ${label}` : 'Play' }
+      }
+    }
+
+    if (latest?.finished) {
+      // A special watched in between leads nowhere in the main run, so carry
+      // on from the newest finished numbered episode instead.
+      const anchor =
+        Number(latest.season) === 0 && !nextEpisodeAfter(seasons, latest.videoId, decodedId)
+          ? Object.values(progress)
+              .filter((entry) => entry.finished && Number(entry.season) !== 0)
+              .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))[0] || latest
+          : latest
+
+      const next = nextEpisodeAfter(seasons, anchor.videoId, decodedId)
+      if (next) {
+        return {
+          kind: 'next',
+          video: next,
+          previous: anchor,
+          videoId: videoIdOf(next, decodedId),
+          label: `Play ${episodeLabel(Number(next.season ?? 0), next.episode)}`,
+        }
+      }
+
+      // Caught up on a show that is still airing: say when the next one lands
+      // instead of offering to start again from the top.
+      const upcoming = seasons
+        .filter((entry) => entry.season !== 0)
+        .flatMap((entry) => entry.videos)
+        .find((video) => !isReleased(video))
+      if (upcoming) {
+        const airs = formatAirDate(upcoming.released || upcoming.firstAired)
+        return { kind: 'none', label: 'Caught up', detail: airs ? `next episode ${airs}` : null }
+      }
+    }
+
+    const first = seasons[0].videos.find(isReleased)
+    if (!first) return null
+
+    const label = episodeLabel(Number(first.season ?? 0), first.episode)
+    return latest?.finished
+      ? { kind: 'select', videoId: videoIdOf(first, decodedId), label: `Watch again · ${label}`, again: true }
+      : { kind: 'select', videoId: videoIdOf(first, decodedId), label: `Start watching · ${label}` }
+  }, [meta, isSeries, progress, decodedId, seasons, findEpisode])
+
+  // Open a series on the episode the main button points at, so the streams
+  // for it are already loading instead of the page asking for a pick.
+  useEffect(() => {
+    if (!isSeries || episodeId || seasons.length === 0 || !progressLoaded) return
+    if (requestedEpisodeId && findEpisode(requestedEpisodeId)) return
+    if (primary?.videoId) selectEpisode(primary.videoId)
+  }, [isSeries, episodeId, seasons, progressLoaded, requestedEpisodeId, findEpisode, primary, selectEpisode])
 
   // ---- Streams (REQ-2.1) ----
 
@@ -173,6 +330,27 @@ export default function Detail() {
       cancelled = true
     }
   }, [type, streamTargetId])
+
+  const requestStreamsFocus = useCallback(() => setStreamsFocus((count) => count + 1), [])
+
+  // Bring the sources into view and put keyboard focus on the first one, or on
+  // the section while they are still loading.
+  useEffect(() => {
+    if (!streamsFocus) return
+    const section = streamsRef.current
+    if (!section) return
+
+    section.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    const firstStream = section.querySelector('ul button:not(:disabled)')
+    ;(firstStream || section).focus({ preventScroll: true })
+  }, [streamsFocus])
+
+  useEffect(() => {
+    if (!focusStreams || !meta || focusHandled.current === location.key) return
+    if (isSeries && !episodeId) return
+    focusHandled.current = location.key
+    requestStreamsFocus()
+  }, [focusStreams, meta, isSeries, episodeId, location.key, requestStreamsFocus])
 
   // ---- Subtitles ----
 
@@ -272,11 +450,10 @@ export default function Detail() {
       .filter((group) => group.streams.length > 0)
   }, [groups, language])
 
-  const selectedVideo = useMemo(() => {
-    if (!isSeries || !episodeId) return null
-    const season = seasons.find((entry) => entry.season === selectedSeason)
-    return season?.videos.find((item) => (item.id || '') === episodeId) || null
-  }, [isSeries, episodeId, seasons, selectedSeason])
+  const selectedVideo = useMemo(
+    () => (isSeries && episodeId ? findEpisode(episodeId)?.video || null : null),
+    [isSeries, episodeId, findEpisode],
+  )
 
   const playItem = useMemo(
     () => ({
@@ -286,27 +463,83 @@ export default function Detail() {
       name: meta?.name,
       poster: meta?.poster,
       background: meta?.background,
+      thumbnail: selectedVideo?.thumbnail || null,
       season: isSeries ? Number(selectedSeason) : null,
-      episode: isSeries ? episodeNumberFor(seasons, selectedSeason, episodeId) : null,
+      episode: isSeries ? selectedVideo?.episode ?? null : null,
       episodeTitle: selectedVideo?.title || selectedVideo?.name || null,
       releaseInfo: meta?.releaseInfo,
       imdbRating: meta?.imdbRating,
     }),
-    [type, decodedId, streamTargetId, meta, isSeries, selectedSeason, seasons, episodeId, selectedVideo],
+    [type, decodedId, streamTargetId, meta, isSeries, selectedSeason, selectedVideo],
   )
+
+  async function runPrimary() {
+    if (!primary || starting) return
+
+    if (primary.kind === 'streams') {
+      requestStreamsFocus()
+      return
+    }
+
+    if (primary.kind === 'select') {
+      selectEpisode(primary.videoId)
+      requestStreamsFocus()
+      return
+    }
+
+    setStarting(true)
+    try {
+      if (primary.kind === 'resume') {
+        if (isSeries) selectEpisode(primary.entry.videoId)
+        await resumeEntry({
+          ...primary.entry,
+          type,
+          id: decodedId,
+          background: primary.entry.background || meta.background || null,
+        })
+      } else if (primary.kind === 'next') {
+        const { video, previous } = primary
+        selectEpisode(primary.videoId)
+        // The same path as an "up next" card on Home, so the release is
+        // matched to the previous episode's in exactly the same way.
+        await resumeEntry({
+          type,
+          id: decodedId,
+          videoId: primary.videoId,
+          name: meta.name,
+          poster: meta.poster,
+          background: meta.background || null,
+          thumbnail: video.thumbnail || null,
+          season: Number(video.season ?? 0),
+          episode: video.episode,
+          episodeTitle: video.title || video.name || null,
+          upNext: true,
+          previousSource: previous.source || null,
+          previousSubtitle: previous.subtitle || null,
+        })
+      }
+    } finally {
+      setStarting(false)
+    }
+  }
 
   // ---- Render ----
 
   if (loadingMeta) {
     return (
-      <div className="page py-8">
-        <div className="flex gap-7">
-          <div className="skeleton aspect-[2/3] w-[210px] shrink-0" />
+      <div className="page pt-5">
+        <div className="skeleton h-7 w-20" />
+        <div className="flex flex-col gap-8 pt-10 sm:flex-row">
+          <div className="skeleton aspect-[2/3] w-[220px] shrink-0 rounded-xl" />
           <div className="flex-1 space-y-3 pt-2">
-            <div className="skeleton h-7 w-1/2" />
+            <div className="skeleton h-12 w-2/5" />
             <div className="skeleton h-3 w-1/3" />
-            <div className="skeleton h-3 w-full" />
-            <div className="skeleton h-3 w-4/5" />
+            <div className="skeleton h-3 w-full max-w-3xl" />
+            <div className="skeleton h-3 w-4/5 max-w-3xl" />
+            <div className="flex gap-2.5 pt-3">
+              <div className="skeleton h-10 w-40" />
+              <div className="skeleton h-10 w-28" />
+            </div>
           </div>
         </div>
       </div>
@@ -334,26 +567,63 @@ export default function Detail() {
     )
   }
 
-  const genres = meta.genres || meta.genre || []
-  const cast = meta.cast || []
-  const director = meta.director || []
+  const rawGenres = meta.genres || meta.genre
+  const genres = Array.isArray(rawGenres) ? rawGenres : []
   const runtime = formatRuntime(meta.runtime)
-  const currentSeason = seasons.find((entry) => entry.season === selectedSeason)
+  const seasonCount = seasons.filter((entry) => entry.season !== 0).length
+  const trailerUrl = trailerUrlOf(meta)
+  const description = typeof meta.description === 'string' ? meta.description : ''
+  const longDescription = description.length > LONG_DESCRIPTION
+
+  const facts = [
+    meta.releaseInfo || meta.year,
+    runtime,
+    TYPE_LABELS[type] || type,
+    isSeries && typeof meta.status === 'string' && meta.status,
+    seasonCount > 0 && `${seasonCount} ${seasonCount === 1 ? 'season' : 'seasons'}`,
+  ].filter(Boolean)
+
+  const { directors, writers, cast } = creditsOf(meta)
+  const directorLabel = directors.length > 1 ? 'Directors' : 'Director'
+  const country = typeof meta.country === 'string' ? meta.country : null
+  const awards = typeof meta.awards === 'string' && meta.awards !== 'N/A' ? meta.awards : null
+
+  // Cinemeta has no director for a series and lists its creators as writers.
+  const credits = [
+    ...(isSeries
+      ? [
+          { label: 'Created by', names: writers },
+          { label: directorLabel, names: directors },
+        ]
+      : [
+          { label: directorLabel, names: directors },
+          { label: writers.length > 1 ? 'Writers' : 'Writer', names: writers },
+        ]),
+    { label: 'Starring', names: cast, wide: true },
+    { label: 'Country', names: country ? [country] : [] },
+    { label: 'Awards', names: awards ? [awards] : [] },
+  ].filter((entry) => entry.names.length > 0)
+
+  const secondaryButton =
+    'focus-ring flex items-center gap-2 rounded-lg px-4 py-2.5 text-[13px] font-medium ring-1 backdrop-blur transition'
 
   return (
     <div className="pb-28">
       {/* Backdrop */}
       <div className="relative">
-        <div className="absolute inset-x-0 top-0 h-[420px] overflow-hidden">
+        <div className="absolute inset-x-0 top-0 h-[560px] overflow-hidden">
           {meta.background && (
             <img
               src={meta.background}
               alt=""
               decoding="async"
-              className="h-full w-full object-cover object-top opacity-60"
+              className="h-full w-full object-cover object-top opacity-80"
             />
           )}
-          <div className="absolute inset-0 bg-gradient-to-t from-ink-950 via-ink-950/90 to-ink-950/50" />
+          {/* Bounded scrims, as on the Home showcase: the text column gets a
+              solid base and the artwork on the right is left mostly alone. */}
+          <div className="absolute inset-0 bg-gradient-to-r from-ink-950 via-ink-950/75 via-45% to-ink-950/20" />
+          <div className="absolute inset-x-0 bottom-0 h-2/3 bg-gradient-to-t from-ink-950 via-ink-950/70 to-transparent" />
         </div>
 
         <div className="relative page pt-5">
@@ -366,9 +636,9 @@ export default function Detail() {
             Back
           </button>
 
-          <div className="flex flex-col gap-7 pt-10 sm:flex-row">
+          <div className="flex flex-col gap-8 pt-10 sm:flex-row">
             {/* Poster with Reactive Ambient Lighting Glow */}
-            <div className="relative group w-[210px] shrink-0">
+            <div className="relative group w-[220px] shrink-0 self-start">
               {meta.poster && (
                 <div
                   aria-hidden="true"
@@ -382,7 +652,7 @@ export default function Detail() {
               )}
               <div className="relative overflow-hidden rounded-xl bg-ink-800 shadow-2xl ring-1 ring-white/10">
                 {meta.poster ? (
-                  <img src={meta.poster} alt={meta.name} decoding="async" className="aspect-[2/3] w-full object-cover" />
+                  <img src={meta.poster} alt="" decoding="async" className="aspect-[2/3] w-full object-cover" />
                 ) : (
                   <div className="flex aspect-[2/3] items-center justify-center text-ink-500">
                     {isSeries ? <Tv size={30} /> : <Film size={30} />}
@@ -392,59 +662,132 @@ export default function Detail() {
             </div>
 
             <div className="min-w-0 flex-1 pt-1">
-              <h1 className="text-3xl font-bold leading-tight tracking-tight text-white">{meta.name}</h1>
+              <h1 className="text-4xl font-bold leading-tight tracking-tight text-white drop-shadow-lg">
+                {meta.logo && !logoFailed ? (
+                  <img
+                    src={meta.logo}
+                    alt={meta.name}
+                    decoding="async"
+                    onError={() => setLogoFailed(true)}
+                    className="max-h-28 w-auto max-w-[min(420px,100%)] object-contain object-left drop-shadow-lg"
+                  />
+                ) : (
+                  meta.name
+                )}
+              </h1>
 
-              <div className="mt-3 flex flex-wrap items-center gap-2">
-                {meta.releaseInfo && <Badge tone="muted">{meta.releaseInfo}</Badge>}
-                {runtime && (
-                  <Badge tone="muted">
-                    <Clock size={10} />
-                    {runtime}
-                  </Badge>
-                )}
+              <div className="mt-4 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[13px] text-slate-300">
                 {meta.imdbRating && (
-                  <Badge tone="amber">
-                    <Star size={10} />
+                  <span className="flex items-center gap-1 font-semibold text-amber-300">
+                    <Star size={13} className="fill-amber-300" />
                     {meta.imdbRating}
-                  </Badge>
+                  </span>
                 )}
-                <Badge tone="accent">{meta.type || type}</Badge>
-                {genres.slice(0, 5).map((genre) => (
-                  <Badge key={genre}>{genre}</Badge>
+                {facts.map((fact, index) => (
+                  <Fragment key={fact}>
+                    {(index > 0 || meta.imdbRating) && (
+                      <span aria-hidden="true" className="text-ink-500">
+                        ·
+                      </span>
+                    )}
+                    <span>{fact}</span>
+                  </Fragment>
                 ))}
               </div>
 
-              {meta.description && (
-                <p className="mt-4 max-w-3xl text-[13.5px] leading-relaxed text-slate-300">{meta.description}</p>
+              {genres.length > 0 && (
+                <div className="mt-3 flex flex-wrap gap-1.5">
+                  {genres.slice(0, 6).map((genre) => (
+                    <Badge key={genre}>{genre}</Badge>
+                  ))}
+                </div>
               )}
 
-              <button
-                type="button"
-                onClick={toggleWatchlist}
-                className={`focus-ring mt-5 flex items-center gap-1.5 rounded-lg px-3.5 py-2 text-[13px] font-medium transition ${
-                  saved
-                    ? 'bg-accent/20 text-accent-soft ring-1 ring-accent/40 hover:bg-accent/30'
-                    : 'bg-ink-800/80 text-slate-200 ring-1 ring-white/10 backdrop-blur hover:bg-ink-700'
-                }`}
-              >
-                {saved ? <BookmarkCheck size={15} /> : <Bookmark size={15} />}
-                {saved ? 'In watchlist' : 'Add to watchlist'}
-              </button>
+              {description && (
+                <div className="mt-4 max-w-3xl">
+                  <p
+                    className={`text-[14px] leading-relaxed text-slate-300 ${
+                      longDescription && !expanded ? 'line-clamp-3' : ''
+                    }`}
+                  >
+                    {description}
+                  </p>
+                  {longDescription && (
+                    <button
+                      type="button"
+                      onClick={() => setExpanded((open) => !open)}
+                      aria-expanded={expanded}
+                      className="focus-ring mt-1 rounded text-[12px] font-medium text-accent-soft transition hover:text-white"
+                    >
+                      {expanded ? 'Less' : 'More'}
+                    </button>
+                  )}
+                </div>
+              )}
 
-              <dl className="mt-4 space-y-1 text-[12px]">
-                {director.length > 0 && (
-                  <div className="flex gap-2">
-                    <dt className="w-16 shrink-0 text-ink-500">Director</dt>
-                    <dd className="text-slate-300">{director.join(', ')}</dd>
-                  </div>
+              <div className="mt-6 flex flex-wrap items-center gap-2.5">
+                {primary &&
+                  (primary.kind === 'none' ? (
+                    <span className="flex items-center gap-2 rounded-lg bg-ink-800/80 px-4 py-2.5 text-[13px] font-medium text-slate-200 ring-1 ring-white/10 backdrop-blur">
+                      <CalendarClock size={15} className="text-accent-soft" />
+                      {primary.label}
+                      {primary.detail && <span className="text-haze">· {primary.detail}</span>}
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={runPrimary}
+                      disabled={starting}
+                      className="focus-ring flex items-center gap-2 rounded-lg bg-accent px-5 py-2.5 text-[14px] font-semibold text-ink-950 transition hover:bg-accent-soft disabled:opacity-80"
+                    >
+                      {starting ? (
+                        <Loader2 size={16} className="animate-spin" />
+                      ) : primary.again ? (
+                        <RotateCcw size={16} />
+                      ) : (
+                        <Play size={16} className="fill-ink-950" />
+                      )}
+                      {primary.label}
+                      {primary.detail && <span className="font-medium text-ink-950/70">· {primary.detail}</span>}
+                    </button>
+                  ))}
+
+                {trailerUrl && (
+                  <button
+                    type="button"
+                    onClick={() => appApi.openExternal(trailerUrl)}
+                    className={`${secondaryButton} bg-white/10 text-slate-100 ring-white/10 hover:bg-white/20`}
+                  >
+                    <Clapperboard size={15} />
+                    Trailer
+                  </button>
                 )}
-                {cast.length > 0 && (
-                  <div className="flex gap-2">
-                    <dt className="w-16 shrink-0 text-ink-500">Cast</dt>
-                    <dd className="text-slate-300">{cast.slice(0, 6).join(', ')}</dd>
-                  </div>
-                )}
-              </dl>
+
+                <button
+                  type="button"
+                  onClick={toggleWatchlist}
+                  aria-pressed={saved}
+                  className={`${secondaryButton} ${
+                    saved
+                      ? 'bg-accent/20 text-accent-soft ring-accent/40 hover:bg-accent/30'
+                      : 'bg-white/10 text-slate-100 ring-white/10 hover:bg-white/20'
+                  }`}
+                >
+                  {saved ? <BookmarkCheck size={15} /> : <Bookmark size={15} />}
+                  {saved ? 'In watchlist' : 'Watchlist'}
+                </button>
+              </div>
+
+              {credits.length > 0 && (
+                <dl className="mt-7 grid max-w-3xl gap-x-10 gap-y-4 sm:grid-cols-2">
+                  {credits.map(({ label, names, wide }) => (
+                    <div key={label} className={wide ? 'sm:col-span-2' : ''}>
+                      <dt className="text-[11px] font-semibold uppercase tracking-wider text-haze">{label}</dt>
+                      <dd className="mt-1 text-[13px] leading-relaxed text-slate-200">{names.join(', ')}</dd>
+                    </div>
+                  ))}
+                </dl>
+              )}
             </div>
           </div>
         </div>
@@ -452,65 +795,34 @@ export default function Detail() {
 
       {/* Episodes */}
       {isSeries && seasons.length > 0 && (
-        <div className="page pt-9">
-          <div className="mb-3 flex flex-wrap items-center gap-2">
-            <h2 className="mr-2 text-[15px] font-semibold text-slate-100">Episodes</h2>
-            {seasons.map((entry) => (
-              <button
-                key={entry.season}
-                type="button"
-                onClick={() => setSelectedSeason(entry.season)}
-                className={`focus-ring rounded-lg px-3 py-1.5 text-[12px] font-medium transition ${
-                  entry.season === selectedSeason
-                    ? 'bg-accent/20 text-accent-soft ring-1 ring-accent/40'
-                    : 'bg-ink-850 text-haze hover:bg-ink-800 hover:text-slate-200'
-                }`}
-              >
-                {entry.season === 0 ? 'Specials' : `Season ${entry.season}`}
-              </button>
-            ))}
-          </div>
-
-          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-            {(currentSeason?.videos || []).map((video) => {
-              const videoId = video.id || `${decodedId}:${video.season}:${video.episode}`
-              const active = videoId === episodeId
-
-              return (
-                <button
-                  key={videoId}
-                  type="button"
-                  onClick={() => setEpisodeId(videoId)}
-                  className={`focus-ring flex items-start gap-3 rounded-lg px-3 py-2.5 text-left ring-1 transition ${
-                    active
-                      ? 'bg-accent/10 ring-accent/40'
-                      : 'bg-ink-850 ring-white/5 hover:bg-ink-800 hover:ring-white/10'
-                  }`}
-                >
-                  <span className="mt-0.5 w-8 shrink-0 text-right text-[12px] font-semibold tabular-nums text-ink-500">
-                    {video.episode ?? '–'}
-                  </span>
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-[13px] font-medium text-slate-200">
-                      {video.title || video.name || `Episode ${video.episode}`}
-                    </span>
-                    {video.released && (
-                      <span className="mt-0.5 block text-[11px] text-ink-500">
-                        {new Date(video.released).toLocaleDateString()}
-                      </span>
-                    )}
-                  </span>
-                </button>
-              )
-            })}
-          </div>
-        </div>
+        <EpisodeList
+          seriesId={decodedId}
+          seasons={seasons}
+          selectedSeason={selectedSeason}
+          onSelectSeason={setSelectedSeason}
+          episodeId={episodeId}
+          onSelectEpisode={setEpisodeId}
+          progress={progress}
+        />
       )}
 
       {/* Streams */}
-      <div className="page pt-9">
+      <section
+        ref={streamsRef}
+        tabIndex={-1}
+        aria-labelledby="streams-heading"
+        className="page scroll-mt-4 pt-10 outline-none"
+      >
         <div className="mb-4 flex flex-wrap items-center gap-3">
-          <h2 className="text-[15px] font-semibold text-slate-100">Streams</h2>
+          <h2 id="streams-heading" className="text-[17px] font-semibold tracking-tight text-slate-100">
+            Streams
+            {selectedVideo && (
+              <span className="ml-2 text-[13px] font-medium text-haze">
+                {episodeLabel(selectedSeason, selectedVideo.episode)}
+                {(selectedVideo.title || selectedVideo.name) && ` · ${selectedVideo.title || selectedVideo.name}`}
+              </span>
+            )}
+          </h2>
           {loadingStreams && <Loader2 size={14} className="animate-spin text-accent" />}
           {!loadingStreams && groups.length > 0 && (
             <span className="text-[11px] uppercase tracking-wider text-ink-500">
@@ -691,7 +1003,7 @@ export default function Detail() {
             onPlay={(stream) => play(stream, playItem, selectedSubtitle)}
           />
         )}
-      </div>
+      </section>
     </div>
   )
 }

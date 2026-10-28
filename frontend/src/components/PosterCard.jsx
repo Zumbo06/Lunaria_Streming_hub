@@ -43,7 +43,7 @@ export default function PosterCard({ meta, width = 'w-[152px]' }) {
         ) : (
           <img
             src={meta.poster}
-            alt={meta.name}
+            alt=""
             loading="lazy"
             decoding="async"
             onLoad={() => setLoaded(true)}

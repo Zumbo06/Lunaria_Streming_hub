@@ -290,6 +290,8 @@ function saveProgress(profileId, entry) {
     videoId,
     name,
     poster,
+    background = null,
+    thumbnail = null,
     season = null,
     episode = null,
     source = null,
@@ -323,6 +325,8 @@ function saveProgress(profileId, entry) {
       videoId: resolvedVideoId,
       name: name || '',
       poster: poster || null,
+      background: background || null,
+      thumbnail: thumbnail || null,
       season,
       episode,
       source,
@@ -425,6 +429,35 @@ function getFinishedSeries(profileId, limit = 8) {
     // happen here rather than in the query.
     .filter((entry) => entry.id && entry.type === 'series')
     .slice(0, limit)
+}
+
+/**
+ * Every recorded episode of one series, keyed by video id, so the detail page
+ * can mark what has been watched and work out where to carry on from.
+ */
+function getSeriesProgress(profileId, type, id) {
+  const rows = db
+    .prepare(
+      `SELECT payload, position_seconds, duration_seconds, percent, finished, updated_at
+         FROM progress WHERE profile_id = ? AND series_key = ?`,
+    )
+    .all(profileId, keyFor(type, id))
+
+  const byVideo = {}
+  for (const row of rows) {
+    const entry = unseal(row.payload) || {}
+    if (!entry.videoId) continue
+
+    byVideo[entry.videoId] = {
+      ...entry,
+      positionSeconds: row.position_seconds,
+      durationSeconds: row.duration_seconds,
+      percent: row.percent,
+      finished: Boolean(row.finished),
+      updatedAt: row.updated_at,
+    }
+  }
+  return byVideo
 }
 
 /** Forgets one video: an episode, or a film. */
@@ -618,6 +651,7 @@ module.exports = {
   getProgress,
   getContinueWatching,
   getFinishedSeries,
+  getSeriesProgress,
   clearProgress,
   clearSeriesProgress,
   clearAllProgress,

@@ -14,7 +14,9 @@ const HERO_SLIDES = 7
 export default function Home() {
   const { current } = useProfile()
   const [shelves, setShelves] = useState(null)
-  const [resumable, setResumable] = useState([])
+  // Null until the first read: it is a local database lookup, so the page
+  // waits for it rather than letting the row push the shelves down later.
+  const [resumable, setResumable] = useState(null)
   const [upNext, setUpNext] = useState([])
   const [featured, setFeatured] = useState(null)
 
@@ -23,7 +25,11 @@ export default function Home() {
   }, [])
 
   const loadResumable = useCallback(async () => {
-    setResumable(await progressApi.continueWatching(20))
+    try {
+      setResumable(await progressApi.continueWatching(20))
+    } catch {
+      setResumable([])
+    }
 
     // Each of these costs a meta lookup to find the following episode, so they
     // are folded in after the row has already painted rather than awaited.
@@ -36,7 +42,7 @@ export default function Home() {
   // Newest activity first, whether that is a half-watched film or the episode
   // after one finished last night.
   const resumeRow = useMemo(
-    () => [...resumable, ...upNext].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)),
+    () => [...(resumable || []), ...upNext].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)),
     [resumable, upNext],
   )
 
@@ -95,9 +101,10 @@ export default function Home() {
     return playApi.onEnded(loadResumable)
   }, [loadResumable, current?.id])
 
-  if (shelves === null) {
+  if (shelves === null || resumable === null) {
     return (
       <div className="page py-6">
+        <HeroSkeleton />
         {Array.from({ length: 3 }, (_, row) => (
           <section key={row} className="mb-8">
             <div className="skeleton mb-3 h-4 w-40" />

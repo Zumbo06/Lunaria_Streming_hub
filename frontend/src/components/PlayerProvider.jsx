@@ -310,6 +310,7 @@ export default function PlayerProvider({ children }) {
         name: entry.name,
         poster: entry.poster || null,
         background: entry.background || entry.poster || null,
+        thumbnail: entry.thumbnail || null,
         season: entry.season ?? null,
         episode: entry.episode ?? null,
         episodeTitle: entry.episodeTitle || null,
@@ -397,9 +398,13 @@ export default function PlayerProvider({ children }) {
             tone: 'info',
             title: `Up next · ${label}`,
             message: [event.next?.episodeTitle, event.stream?.filename].filter(Boolean).join(' — '),
+            image: event.next?.thumbnail || null,
             countdownTo: Date.now() + (event.startsInMs || 0),
             duration: 0,
-            action: { label: 'Cancel', run: () => playApi.cancelAutoAdvance() },
+            actions: [
+              { label: 'Play now', primary: true, run: () => playApi.advanceNow() },
+              { label: 'Cancel', run: () => playApi.cancelAutoAdvance() },
+            ],
           })
           break
         case 'cancelled':
@@ -463,6 +468,7 @@ export default function PlayerProvider({ children }) {
       busyStreamId,
       engine,
       pushToast,
+      dismissToast,
       locatePlayer,
       applySubtitleNow,
       loadingSession,
@@ -477,6 +483,7 @@ export default function PlayerProvider({ children }) {
       busyStreamId,
       engine,
       pushToast,
+      dismissToast,
       locatePlayer,
       applySubtitleNow,
       loadingSession,
@@ -543,6 +550,18 @@ function ToastStack({ toasts, onDismiss }) {
       {toasts.map((toast) => {
         const tone = TOAST_TONES[toast.tone] || TOAST_TONES.info
         const Icon = tone.icon
+        // A single `action` is the common case; `actions` lets one toast offer
+        // a choice, such as "Play now" next to "Cancel".
+        const actions = toast.actions || (toast.action ? [toast.action] : [])
+
+        const text = (
+          <div className="min-w-0">
+            <p className="text-[13px] font-semibold text-slate-100">{toast.title}</p>
+            {toast.message && (
+              <p className="mt-0.5 break-words text-[12px] leading-snug text-haze">{toast.message}</p>
+            )}
+          </div>
+        )
 
         return (
           <div
@@ -552,22 +571,43 @@ function ToastStack({ toasts, onDismiss }) {
             <div className="flex items-start gap-2.5">
               <Icon size={16} className={`mt-0.5 shrink-0 ${tone.accent}`} />
               <div className="min-w-0 flex-1">
-                <p className="text-[13px] font-semibold text-slate-100">{toast.title}</p>
-                {toast.message && (
-                  <p className="mt-0.5 break-words text-[12px] leading-snug text-haze">{toast.message}</p>
+                {toast.image ? (
+                  <div className="flex items-start gap-2.5">
+                    <img
+                      src={toast.image}
+                      alt=""
+                      decoding="async"
+                      onError={(event) => {
+                        event.currentTarget.style.display = 'none'
+                      }}
+                      className="aspect-video w-28 shrink-0 rounded-md bg-ink-800 object-cover ring-1 ring-white/10"
+                    />
+                    {text}
+                  </div>
+                ) : (
+                  text
                 )}
                 {toast.countdownTo && <Countdown endsAt={toast.countdownTo} />}
-                {toast.action && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      toast.action.run()
-                      onDismiss(toast.id)
-                    }}
-                    className="focus-ring mt-2 rounded bg-ink-700 px-2 py-1 text-[11.5px] font-medium text-slate-200 hover:bg-ink-600"
-                  >
-                    {toast.action.label}
-                  </button>
+                {actions.length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {actions.map((action) => (
+                      <button
+                        key={action.label}
+                        type="button"
+                        onClick={() => {
+                          action.run()
+                          onDismiss(toast.id)
+                        }}
+                        className={`focus-ring rounded px-2.5 py-1 text-[11.5px] font-medium transition ${
+                          action.primary
+                            ? 'bg-accent text-ink-950 hover:bg-accent-soft'
+                            : 'bg-ink-700 text-slate-200 hover:bg-ink-600'
+                        }`}
+                      >
+                        {action.label}
+                      </button>
+                    ))}
+                  </div>
                 )}
               </div>
               <button

@@ -337,9 +337,9 @@ function orderedVideos(meta) {
       season: Number(video.season ?? 0),
       episode: Number(video.episode ?? 0),
     }))
-    // Specials sit in season 0 and therefore sort ahead of the first season,
-    // which is where the detail page places them too.
-    .sort((a, b) => a.season - b.season || a.episode - b.episode)
+    // Specials (season 0) sit after the numbered seasons, which is where the
+    // detail page places them too.
+    .sort((a, b) => (a.season === 0) - (b.season === 0) || a.season - b.season || a.episode - b.episode)
 }
 
 /**
@@ -347,6 +347,10 @@ function orderedVideos(meta) {
  * or the first of the season after it. Returns null at the end of the series,
  * when every later episode is still unaired, or when the current episode is not
  * part of this meta at all.
+ *
+ * Specials are never stepped into from a numbered season, and a special only
+ * leads on to the next special: finishing one must not send someone back to
+ * the first episode of a show they are halfway through.
  */
 function nextVideo(meta, currentVideoId) {
   if (!currentVideoId) return null
@@ -355,7 +359,12 @@ function nextVideo(meta, currentVideoId) {
   const at = ordered.findIndex((video) => video.id === currentVideoId)
   if (at === -1) return null
 
-  return ordered.slice(at + 1).find(isReleased) || null
+  const inSpecials = ordered[at].season === 0
+  return (
+    ordered
+      .slice(at + 1)
+      .find((video) => (video.season === 0) === inSpecials && isReleased(video)) || null
+  )
 }
 
 /**

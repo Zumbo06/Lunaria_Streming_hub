@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
-import { ChevronLeft, ChevronRight, Info, Play, Star } from 'lucide-react'
+import { Link, useNavigate } from 'react-router-dom'
+import { Bookmark, BookmarkCheck, ChevronLeft, ChevronRight, Play, Star } from 'lucide-react'
+import { watchlistApi } from '../api/orion.js'
 
 const ADVANCE_MS = 7000
 // After a manual click, hold off the timer so the slide does not slide out from
@@ -19,6 +20,7 @@ export default function HeroPanel({ items = [] }) {
   const navigate = useNavigate()
   const [index, setIndex] = useState(0)
   const [paused, setPaused] = useState(false)
+  const [saved, setSaved] = useState(false)
   const resumeTimer = useRef(null)
 
   const count = items.length
@@ -54,9 +56,40 @@ export default function HeroPanel({ items = [] }) {
     if (index >= count && count > 0) setIndex(0)
   }, [count, index])
 
-  if (count === 0) return null
+  const item = items[index] || null
 
-  const item = items[index]
+  useEffect(() => {
+    if (!item) return undefined
+    let cancelled = false
+    setSaved(false)
+    watchlistApi.has(item.type, item.id).then((value) => {
+      if (!cancelled) setSaved(Boolean(value))
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [item?.type, item?.id])
+
+  if (!item) return null
+
+  const detailPath = `/title/${encodeURIComponent(item.type)}/${encodeURIComponent(item.id)}`
+
+  async function toggleWatchlist() {
+    if (saved) {
+      await watchlistApi.remove(item.type, item.id)
+      setSaved(false)
+    } else {
+      await watchlistApi.add({
+        type: item.type,
+        id: item.id,
+        name: item.name,
+        poster: item.poster,
+        releaseInfo: item.releaseInfo,
+      })
+      setSaved(true)
+    }
+  }
+
   const year = item.releaseInfo || item.year || ''
   const genres = (item.genres || item.genre || []).slice(0, 3)
 
@@ -77,6 +110,12 @@ export default function HeroPanel({ items = [] }) {
         className="relative h-[340px] overflow-hidden rounded-2xl bg-ink-900 shadow-2xl ring-1 ring-white/10 sm:h-[400px]"
         onMouseEnter={() => setPaused(true)}
         onMouseLeave={() => setPaused(false)}
+        // Keyboard users get the same courtesy as the mouse: no slide change
+        // while focus is somewhere inside the showcase.
+        onFocus={() => setPaused(true)}
+        onBlur={(event) => {
+          if (!event.currentTarget.contains(event.relatedTarget)) setPaused(false)
+        }}
         aria-roledescription="carousel"
         aria-label="Featured titles"
       >
@@ -107,18 +146,20 @@ export default function HeroPanel({ items = [] }) {
       ))}
 
       <div className="relative flex h-full max-w-2xl flex-col justify-end p-6 sm:p-8">
-        {item.logo ? (
-          <img
-            src={item.logo}
-            alt={item.name}
-            decoding="async"
-            className="mb-3 max-h-20 w-auto max-w-[320px] object-contain object-left drop-shadow-lg"
-          />
-        ) : (
-          <h2 className="mb-2 text-3xl font-bold leading-tight tracking-tight text-white drop-shadow-lg">
-            {item.name}
-          </h2>
-        )}
+        <h2 className="mb-2 self-start text-3xl font-bold leading-tight tracking-tight text-white drop-shadow-lg">
+          <Link to={detailPath} className="focus-ring block rounded-md hover:text-slate-200">
+            {item.logo ? (
+              <img
+                src={item.logo}
+                alt={item.name}
+                decoding="async"
+                className="mb-1 max-h-20 w-auto max-w-[320px] object-contain object-left drop-shadow-lg"
+              />
+            ) : (
+              item.name
+            )}
+          </Link>
+        </h2>
 
         <div className="mb-2.5 flex flex-wrap items-center gap-2 text-[12px] text-slate-300 drop-shadow">
           {item.imdbRating && (
@@ -141,21 +182,27 @@ export default function HeroPanel({ items = [] }) {
         )}
 
         <div className="flex items-center gap-2.5">
+          {/* Lands on the title with its sources in view — one step from playing. */}
           <button
             type="button"
-            onClick={() => navigate(`/title/${encodeURIComponent(item.type)}/${encodeURIComponent(item.id)}`)}
-            className="focus-ring flex items-center gap-2 rounded-lg bg-accent px-5 py-2.5 text-[13.5px] font-semibold text-ink-950 transition hover:bg-accent-soft"
+            onClick={() => navigate(detailPath, { state: { focusStreams: true } })}
+            className="focus-ring flex items-center gap-2 rounded-lg bg-accent px-5 py-2.5 text-[13px] font-semibold text-ink-950 transition hover:bg-accent-soft"
           >
             <Play size={15} className="fill-ink-950" />
             Watch
           </button>
           <button
             type="button"
-            onClick={() => navigate(`/title/${encodeURIComponent(item.type)}/${encodeURIComponent(item.id)}`)}
-            className="focus-ring flex items-center gap-2 rounded-lg bg-white/10 px-4 py-2.5 text-[13px] font-medium text-slate-100 backdrop-blur transition hover:bg-white/20"
+            onClick={toggleWatchlist}
+            aria-pressed={saved}
+            className={`focus-ring flex items-center gap-2 rounded-lg px-4 py-2.5 text-[13px] font-medium backdrop-blur transition ${
+              saved
+                ? 'bg-accent/20 text-accent-soft ring-1 ring-accent/40 hover:bg-accent/30'
+                : 'bg-white/10 text-slate-100 hover:bg-white/20'
+            }`}
           >
-            <Info size={15} />
-            Details
+            {saved ? <BookmarkCheck size={15} /> : <Bookmark size={15} />}
+            {saved ? 'In watchlist' : 'Watchlist'}
           </button>
         </div>
       </div>
@@ -179,18 +226,23 @@ export default function HeroPanel({ items = [] }) {
             <ChevronRight size={20} />
           </button>
 
-          <div className="absolute bottom-5 right-6 flex items-center gap-1.5">
+          <div className="absolute bottom-3.5 right-5 flex items-center">
             {items.map((entry, position) => (
+              // The visible bar is tiny; the button around it is a full 24px target.
               <button
                 key={`dot-${entry.type}-${entry.id}`}
                 type="button"
                 aria-label={`Go to ${entry.name}`}
                 aria-current={position === index}
                 onClick={() => go(position, true)}
-                className={`focus-ring h-1.5 rounded-full transition-all ${
-                  position === index ? 'w-6 bg-accent' : 'w-1.5 bg-white/40 hover:bg-white/70'
-                }`}
-              />
+                className="focus-ring group/dot flex h-6 min-w-6 items-center justify-center rounded-full"
+              >
+                <span
+                  className={`block h-1.5 rounded-full transition-all ${
+                    position === index ? 'w-6 bg-accent' : 'w-1.5 bg-white/40 group-hover/dot:bg-white/70'
+                  }`}
+                />
+              </button>
             ))}
           </div>
         </>

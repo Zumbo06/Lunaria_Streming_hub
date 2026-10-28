@@ -109,3 +109,97 @@ export function formatRuntime(runtime) {
   const minutes = runtime % 60
   return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`
 }
+
+// ---- Credits ----
+
+/**
+ * Addons disagree on how credits travel: Cinemeta sends `director`, `writer`
+ * and `cast` as arrays (with `director: null` for series) and repeats them in
+ * `links` by category, while others send a comma-joined string or `{ name }`
+ * objects. Every shape is folded into plain, de-duplicated name lists.
+ */
+const CREDIT_SOURCES = {
+  directors: { field: 'director', category: 'Directors' },
+  writers: { field: 'writer', category: 'Writers' },
+  cast: { field: 'cast', category: 'Cast' },
+}
+
+function namesFrom(value) {
+  if (!value) return []
+  if (typeof value === 'string') return value.split(',')
+  if (!Array.isArray(value)) return []
+  return value.map((entry) => (typeof entry === 'string' ? entry : entry?.name))
+}
+
+export function creditsOf(meta) {
+  const credits = {}
+
+  for (const [role, { field, category }] of Object.entries(CREDIT_SOURCES)) {
+    const fromLinks = (Array.isArray(meta?.links) ? meta.links : [])
+      .filter((link) => link?.category === category)
+      .map((link) => link.name)
+    const fromExtras = role === 'cast' ? namesFrom(meta?.app_extras?.cast) : []
+
+    const names = []
+    const seen = new Set()
+    for (const raw of [...namesFrom(meta?.[field]), ...fromLinks, ...fromExtras]) {
+      const name = typeof raw === 'string' ? raw.trim() : ''
+      if (!name || seen.has(name.toLowerCase())) continue
+      seen.add(name.toLowerCase())
+      names.push(name)
+    }
+    credits[role] = names
+  }
+
+  return credits
+}
+
+/** YouTube link for the first trailer an addon lists, if any. */
+export function trailerUrlOf(meta) {
+  const id =
+    (Array.isArray(meta?.trailerStreams) && meta.trailerStreams.find((entry) => entry?.ytId)?.ytId) ||
+    (Array.isArray(meta?.trailers) && meta.trailers.find((entry) => entry?.source)?.source)
+  return id ? `https://www.youtube.com/watch?v=${encodeURIComponent(id)}` : null
+}
+
+// ---- Episodes ----
+
+/** "21 Jan 2008" in the user's locale, or null for a missing or broken date. */
+export function formatAirDate(value) {
+  const at = value ? new Date(value) : null
+  if (!at || Number.isNaN(at.getTime())) return null
+  return at.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })
+}
+
+/** Addons may omit an episode's `id`; this is the shape the main process falls back to. */
+export function videoIdOf(video, seriesId) {
+  return video.id || `${seriesId}:${video.season}:${video.episode}`
+}
+
+/** Same rule as `isReleased` in electron/addons.js: undated episodes count as out. */
+export function isReleased(video) {
+  const when = video?.released || video?.firstAired
+  if (!when) return true
+
+  const at = Date.parse(when)
+  return Number.isNaN(at) || at <= Date.now()
+}
+
+/**
+ * The episode after `videoId` across the detail page's season list, mirroring
+ * `nextVideo` in electron/addons.js so the detail page and Home's "up next"
+ * always agree: unaired episodes are skipped, and specials only lead on to
+ * other specials.
+ */
+export function nextEpisodeAfter(seasons, videoId, seriesId) {
+  const ordered = seasons.flatMap((entry) => entry.videos)
+  const at = ordered.findIndex((video) => videoIdOf(video, seriesId) === videoId)
+  if (at === -1) return null
+
+  const inSpecials = Number(ordered[at].season ?? 0) === 0
+  return (
+    ordered
+      .slice(at + 1)
+      .find((video) => (Number(video.season ?? 0) === 0) === inSpecials && isReleased(video)) || null
+  )
+}
